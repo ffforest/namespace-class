@@ -51,6 +51,7 @@ make image-build       # build namespace-class-controller:dev locally
 make image-load        # load namespace-class-controller:dev into minikube
 make deploy-local      # build, load, install, restart, wait, and smoke-test locally
 make smoke             # run cluster smoke checks
+make rbac-check        # inspect deployed controller ServiceAccount RBAC
 ```
 
 `make deploy-local` uses a unique local image tag derived from `IMAGE_TAG` and the current timestamp so minikube does not reuse an older same-tag image.

@@ -16,7 +16,6 @@ No open high-priority harness/design items.
 - [ ] Pin the `setup-envtest` install version in `Makefile` instead of using `@latest`, so envtest behavior remains reproducible.
 - [ ] Add dependency drift targets such as `make mod-tidy` and `make mod-check`, and include the check in the aggregate verification path.
 - [ ] Add `make scripts-check` for shell and Ruby syntax checks, then include it in `make check`.
-- [ ] Add RBAC feedback with a target such as `make rbac-check`, using `kubectl auth can-i` for the controller service account and key resource operations.
 - [ ] Tighten template variable scope. Recommended first slice: support only `.Namespace.Name`, `.Namespace.UID`, and `.Class.Name`; defer labels/annotations until escaping and key lookup syntax are defined.
 
 ### Low

@@ -36,3 +36,4 @@
 - Upgraded envtest and smoke to verify a cluster-scoped `ClusterRole` is recorded with empty namespace and deleted during namespace deletion.
 - Added runtime GVK policy guard with allow-all default plus `ClusterRoleBinding` denylist, configurable allow/deny GVK flags, Helm values, and `Ready=False` / `GVKDenied` binding status.
 - Upgraded unit tests, envtest, and smoke to verify the default policy denies `ClusterRoleBinding` and prevents controller-mediated privilege escalation.
+- Added `make rbac-check` to inspect the deployed controller ServiceAccount RBAC, fail on missing required permissions, and warn on broad/high-risk permissions such as wildcard RBAC and `ClusterRoleBinding` creation.

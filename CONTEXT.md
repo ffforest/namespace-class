@@ -29,6 +29,7 @@
 - `NamespaceClass` missing/deleted cleanup treats the desired set as empty; cleanup success deletes the binding, while cleanup failure keeps the binding with a `CleanupFailed` condition for retry.
 - The repository has a working envtest harness. `make envtest` starts a real API server and etcd, installs project CRDs, and validates CRD/status behavior.
 - `make check` is the aggregate local verification entry point and includes unit tests, envtest, vet, manifest checks, and Helm rendering.
+- `make rbac-check` is a live-cluster harness target for the deployed controller ServiceAccount. It is intentionally not part of `make check` because it requires cluster access and an installed release.
 - Current CRD manifests are handwritten YAML. Go API types and controller-gen are not wired in yet.
 
 ## Open Questions

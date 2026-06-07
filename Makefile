@@ -27,13 +27,15 @@ IMAGE_GOARCH ?= $(shell $(GO) env GOARCH)
 CONTAINER_BIN := $(BIN_DIR)/$(IMAGE_GOOS)-$(IMAGE_GOARCH)/namespace-class-controller
 RELEASE_NAME ?= namespace-class
 RELEASE_NAMESPACE ?= namespace-class-system
+RBAC_SERVICE_ACCOUNT ?= namespace-class-controller
+RBAC_SAMPLE_NAMESPACE ?= default
 ENVTEST_K8S_VERSION ?= 1.35.0
 ENVTEST_ASSETS_DIR ?= $(ROOT_DIR)/.tools/envtest
 CRD_WAIT_TIMEOUT ?= 60s
 CONTROLLER_WAIT_TIMEOUT ?= 120s
 
 .PHONY: help tools envtest-tools doctor build container-binary image-build image-load test envtest vet fmt fmt-fix docs-check manifests-check helm-template check \
-	cluster-check deploy-crds wait-crds undeploy-crds deploy restart-controller wait-controller deploy-local deploy-local-with-image undeploy-local smoke clean
+	cluster-check deploy-crds wait-crds undeploy-crds deploy restart-controller wait-controller deploy-local deploy-local-with-image undeploy-local smoke rbac-check clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -155,6 +157,9 @@ undeploy-local: ## Uninstall local controller Helm release
 
 smoke: ## Run minikube/current-cluster smoke checks
 	RELEASE_NAME=$(RELEASE_NAME) RELEASE_NAMESPACE=$(RELEASE_NAMESPACE) CRD_WAIT_TIMEOUT=$(CRD_WAIT_TIMEOUT) CONTROLLER_WAIT_TIMEOUT=$(CONTROLLER_WAIT_TIMEOUT) bash scripts/kube-smoke.sh
+
+rbac-check: ## Check deployed controller ServiceAccount RBAC in the current cluster
+	KUBECTL=$(KUBECTL) RELEASE_NAMESPACE=$(RELEASE_NAMESPACE) SERVICE_ACCOUNT_NAME=$(RBAC_SERVICE_ACCOUNT) SAMPLE_NAMESPACE=$(RBAC_SAMPLE_NAMESPACE) bash scripts/rbac-check.sh
 
 clean: ## Remove local build outputs
 	rm -rf $(BIN_DIR) .runtime coverage reports
