@@ -15,8 +15,10 @@ cleanup_behavior_smoke() {
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-old" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-internal" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-deleted" --namespace "$BEHAVIOR_SMOKE_NAME"
+    kubectl delete --ignore-not-found=true clusterrole "$BEHAVIOR_SMOKE_NAME-cluster-reader"
     kubectl delete --ignore-not-found=true namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
+    kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-cluster"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-deleted"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-internal"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME"
@@ -282,6 +284,102 @@ YAML
     fi
     if ((i == wait_seconds - 1)); then
       echo "expected NamespaceClassBinding $BEHAVIOR_SMOKE_NAME to be deleted after class deletion" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  echo "Checking controller cleans up cluster-scoped resources during namespace deletion"
+  kubectl apply -f - <<YAML
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: $BEHAVIOR_SMOKE_NAME-cluster
+spec:
+  resources:
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: $BEHAVIOR_SMOKE_NAME-cluster-reader
+      rules:
+        - apiGroups:
+            - ""
+          resources:
+            - pods
+          verbs:
+            - get
+YAML
+  kubectl label namespace "$BEHAVIOR_SMOKE_NAME" namespaceclass.akuity.io/name="$BEHAVIOR_SMOKE_NAME-cluster" --overwrite
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if kubectl get clusterrole "$BEHAVIOR_SMOKE_NAME-cluster-reader" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected ClusterRole $BEHAVIOR_SMOKE_NAME-cluster-reader to be created" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    inventory_entries="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{range .status.inventory[*]}{.kind}{"/"}{.namespace}{"/"}{.name}{" "}{end}')"
+    if [[ " $inventory_entries " == *" ClusterRole//$BEHAVIOR_SMOKE_NAME-cluster-reader "* ]]; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected inventory to contain cluster-scoped ClusterRole, got: $inventory_entries" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    namespace_finalizers="$(kubectl get namespace "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.metadata.finalizers[*]}')"
+    if [[ " $namespace_finalizers " == *" namespaceclass.akuity.io/finalizer "* ]]; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected namespace finalizer namespaceclass.akuity.io/finalizer, got: $namespace_finalizers" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  kubectl delete namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get clusterrole "$BEHAVIOR_SMOKE_NAME-cluster-reader" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected ClusterRole $BEHAVIOR_SMOKE_NAME-cluster-reader to be deleted during namespace deletion" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected NamespaceClassBinding $BEHAVIOR_SMOKE_NAME to be deleted during namespace deletion" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    namespace_finalizers=""
+    if ! namespace_finalizers="$(kubectl get namespace "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.metadata.finalizers[*]}' 2>/dev/null)"; then
+      break
+    fi
+    if [[ " $namespace_finalizers " != *" namespaceclass.akuity.io/finalizer "* ]]; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected namespace finalizer to be removed during namespace deletion, got: $namespace_finalizers" >&2
       exit 1
     fi
     sleep 1

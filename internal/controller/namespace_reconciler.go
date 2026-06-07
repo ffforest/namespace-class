@@ -117,12 +117,23 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	}
 
 	if !namespace.DeletionTimestamp.IsZero() {
+		if hasNamespaceFinalizer(namespace) {
+			if err := r.cleanupBindingForDeletingNamespace(ctx, namespace); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.removeNamespaceFinalizer(ctx, namespace); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
 	className := namespace.Labels[namespaceclassv1alpha1.ClassLabelKey]
 	if className == "" {
 		if err := r.cleanupBindingForNamespace(ctx, namespace); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.removeNamespaceFinalizer(ctx, namespace); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -132,6 +143,25 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *NamespaceReconciler) cleanupBindingForDeletingNamespace(ctx context.Context, namespace *corev1.Namespace) error {
+	binding := &namespaceclassv1alpha1.NamespaceClassBinding{}
+	if err := r.Get(ctx, client.ObjectKey{Name: namespace.Name}, binding); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get namespaceclassbinding for namespace deletion cleanup: %w", err)
+	}
+
+	clusterScopedInventory := clusterScopedResourceRefs(binding.Status.Inventory)
+	if err := r.deleteStaleManagedResources(ctx, namespace, clusterScopedInventory, nil); err != nil {
+		return err
+	}
+	if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete namespaceclassbinding after namespace deletion cleanup: %w", err)
+	}
+	return nil
 }
 
 func (r *NamespaceReconciler) cleanupBindingForNamespace(ctx context.Context, namespace *corev1.Namespace) error {
@@ -155,6 +185,11 @@ func (r *NamespaceReconciler) cleanupBindingForNamespace(ctx context.Context, na
 
 func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *corev1.Namespace, className string) error {
 	namespaceClass, observedClassGeneration, condition := r.classCondition(ctx, className)
+	if namespaceClass != nil {
+		if err := r.ensureNamespaceFinalizer(ctx, namespace); err != nil {
+			return err
+		}
+	}
 
 	bindingName := namespace.Name
 	binding := &namespaceclassv1alpha1.NamespaceClassBinding{}
@@ -210,7 +245,7 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete namespaceclassbinding after missing class cleanup: %w", err)
 		}
-		return nil
+		return r.removeNamespaceFinalizer(ctx, namespace)
 	}
 
 	inventory, err := r.applyManagedResources(ctx, namespace, namespaceClass)
@@ -231,6 +266,53 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 	}
 
 	return nil
+}
+
+func clusterScopedResourceRefs(refs []namespaceclassv1alpha1.ResourceRef) []namespaceclassv1alpha1.ResourceRef {
+	clusterScoped := []namespaceclassv1alpha1.ResourceRef{}
+	for _, ref := range refs {
+		if ref.Namespace == "" {
+			clusterScoped = append(clusterScoped, ref)
+		}
+	}
+	return clusterScoped
+}
+
+func (r *NamespaceReconciler) ensureNamespaceFinalizer(ctx context.Context, namespace *corev1.Namespace) error {
+	if hasNamespaceFinalizer(namespace) {
+		return nil
+	}
+	namespace.SetFinalizers(append(namespace.GetFinalizers(), namespaceclassv1alpha1.NamespaceFinalizer))
+	if err := r.Update(ctx, namespace); err != nil {
+		return fmt.Errorf("add namespace finalizer: %w", err)
+	}
+	return nil
+}
+
+func (r *NamespaceReconciler) removeNamespaceFinalizer(ctx context.Context, namespace *corev1.Namespace) error {
+	if !hasNamespaceFinalizer(namespace) {
+		return nil
+	}
+	finalizers := []string{}
+	for _, finalizer := range namespace.GetFinalizers() {
+		if finalizer != namespaceclassv1alpha1.NamespaceFinalizer {
+			finalizers = append(finalizers, finalizer)
+		}
+	}
+	namespace.SetFinalizers(finalizers)
+	if err := r.Update(ctx, namespace); err != nil {
+		return fmt.Errorf("remove namespace finalizer: %w", err)
+	}
+	return nil
+}
+
+func hasNamespaceFinalizer(namespace *corev1.Namespace) bool {
+	for _, finalizer := range namespace.GetFinalizers() {
+		if finalizer == namespaceclassv1alpha1.NamespaceFinalizer {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *NamespaceReconciler) applyManagedResources(ctx context.Context, namespace *corev1.Namespace, namespaceClass *namespaceclassv1alpha1.NamespaceClass) ([]namespaceclassv1alpha1.ResourceRef, error) {

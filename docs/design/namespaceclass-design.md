@@ -517,10 +517,11 @@ namespace label 可能从 A 切到 B，又快速切到 C。
 
 应对：
 
-1. controller 可以不强行逐个删除 namespaced resources。
+1. controller 不强行逐个删除 namespaced resources，交给 Kubernetes namespace garbage collection。
 2. 如果 inventory 中包含 cluster-scoped resources，则需要在 namespace 删除前清理它们。
-3. 如果支持 cluster-scoped resources，建议给 namespace 添加 finalizer，确保这些资源被清理后再允许 namespace 完成删除。
-4. 如果某个部署通过策略禁用了 cluster-scoped resources，可以避免 namespace finalizer，降低卡死风险。
+3. controller 在成功解析到 `NamespaceClass` 且创建 managed resources 前，为 namespace 添加 `namespaceclass.akuity.io/finalizer`。
+4. namespace 删除时，controller 只清理 inventory 中 `namespace` 为空的 cluster-scoped resources，清理成功后删除 `NamespaceClassBinding` 并移除 finalizer。
+5. 如果某个部署通过策略禁用了 cluster-scoped resources，可以避免 namespace finalizer，降低卡死风险。
 
 ### 13.6 NamespaceClass 被删除
 
@@ -703,6 +704,7 @@ spec:
 1. 增加一个额外 CRD 和 controller 维护逻辑。
 2. binding 生命周期需要和 namespace、class 删除语义配合。
 3. inventory 损坏时仍然需要 best-effort rebuild。
+4. namespace finalizer 会把 cleanup 失败转化为 namespace 删除阻塞，需要清晰的状态、日志和运维排障手段。
 
 ConfigMap inventory 实现更简单，但不适合本设计对任意资源和 cluster-scoped resources 的支持目标。
 
@@ -746,7 +748,7 @@ ConfigMap inventory 实现更简单，但不适合本设计对任意资源和 cl
 但这带来额外风险：
 
 1. 命名是全局的，容易冲突。
-2. 删除需要更谨慎，不能依赖 namespace deletion。
+2. 删除需要更谨慎，不能依赖 namespace deletion；必须依赖 binding inventory 和 namespace finalizer 清理 cluster-scoped resources。
 3. RBAC 风险更高。
 4. 高权限资源可能被 `NamespaceClass` 间接创建。
 

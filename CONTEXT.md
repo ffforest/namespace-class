@@ -21,6 +21,7 @@
 - Existing resources without controller ownership markers are not adopted or overwritten.
 - Removing a namespace class label makes the desired set empty for that namespace; cleanup is driven by binding inventory.
 - Deleting a `NamespaceClass` makes the desired set empty for namespaces that still reference it; default behavior is cleanup based on binding inventory.
+- The controller adds namespace finalizer `namespaceclass.akuity.io/finalizer` before creating managed resources for a resolved class. During namespace deletion it uses binding inventory to delete cluster-scoped managed resources, deletes the binding, then removes the finalizer. Namespaced managed resources are left to Kubernetes namespace garbage collection during namespace deletion.
 - Template support is intentionally small: string substitution only, with no loops, conditionals, functions, external lookups, or cross-resource references.
 - Safety risks from arbitrary resources are handled with RBAC boundaries, ownership markers, GVK policy, explicit status, and planned admission validation.
 - First implementation does not dynamically watch every managed GVK. Drift is repaired through primary-object watches and periodic resync.

@@ -32,3 +32,5 @@
 - Upgraded envtest and smoke to verify label removal cleanup.
 - Added `NamespaceClass` deletion cleanup: delete events fan out through bindings, missing classes are treated as an empty desired set, cleanup success deletes the binding, and cleanup failure records `CleanupFailed`.
 - Upgraded envtest and smoke to verify `NamespaceClass` deletion cleanup.
+- Added namespace finalizer support for cluster-scoped managed resources: resolved classes add `namespaceclass.akuity.io/finalizer`, namespace deletion cleans cluster-scoped inventory, deletes the binding, and removes the finalizer.
+- Upgraded envtest and smoke to verify a cluster-scoped `ClusterRole` is recorded with empty namespace and deleted during namespace deletion.

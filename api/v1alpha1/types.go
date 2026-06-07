@@ -8,6 +8,8 @@ import (
 const (
 	ClassLabelKey = "namespaceclass.akuity.io/name"
 
+	NamespaceFinalizer = "namespaceclass.akuity.io/finalizer"
+
 	ManagedLabelKey          = "namespaceclass.akuity.io/managed"
 	ClassLabelOwnerKey       = "namespaceclass.akuity.io/class"
 	NamespaceLabelOwnerKey   = "namespaceclass.akuity.io/namespace"
