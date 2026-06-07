@@ -71,6 +71,62 @@ The repository contains a working controller implementation for the core Namespa
 
 The local harness supports unit tests, envtest-backed controller integration tests, linting, manifest checks, Helm rendering, minikube deployment, smoke tests, and live RBAC inspection.
 
+## Controller Flow
+
+All managed resource mutations go through namespace reconciliation. `NamespaceClass` and `NamespaceClassBinding` watches only enqueue affected namespaces; they do not apply resources directly.
+
+```mermaid
+flowchart TD
+  A["Watch: Namespace"] --> R["Namespace Reconcile"]
+  B["Watch: NamespaceClass"] --> BF["fan out by NamespaceClassBinding.spec.className"]
+  C["Watch: NamespaceClassBinding"] --> BR["enqueue binding.spec.namespaceName"]
+  BF --> R
+  BR --> R
+  T["Periodic requeue"] --> R
+
+  R --> N{"Namespace exists?"}
+  N -- "No" --> END["Stop"]
+  N -- "Yes" --> D{"Namespace deleting?"}
+
+  D -- "Yes" --> FD["finalizer cleanup"]
+  FD --> FDI["delete cluster-scoped inventory"]
+  FDI --> FDB["delete NamespaceClassBinding"]
+  FDB --> FDR["remove namespace finalizer"]
+  FDR --> END
+
+  D -- "No" --> L{"Has class label?"}
+  L -- "No" --> LC["delete resources from binding inventory"]
+  LC --> LB["delete NamespaceClassBinding"]
+  LB --> LF["remove finalizer"]
+  LF --> END
+
+  L -- "Yes" --> G["read NamespaceClass"]
+  G --> GE{"Read result"}
+  GE -- "read error other than NotFound" --> RE["return error and requeue without cleanup"]
+  GE -- "NotFound" --> MC["treat desired set as empty"]
+  MC --> MCD["delete old inventory"]
+  MCD --> MCB["delete binding and finalizer"]
+  MCB --> END
+
+  GE -- "Found" --> EF["ensure namespace finalizer"]
+  EF --> BIND["create or update NamespaceClassBinding"]
+  BIND --> PREP["render, parse, validate, resolve scope"]
+  PREP --> APPLY["server-side apply desired resources"]
+  APPLY --> AF{"All apply succeeded?"}
+
+  AF -- "No" --> PIS["status.inventory = oldInventory + appliedRefs"]
+  PIS --> PIF["Ready=False / ApplyFailed or ApplyConflict"]
+  PIF --> END
+
+  AF -- "Yes" --> STALE["delete stale resources"]
+  STALE --> DS{"Delete succeeded?"}
+  DS -- "No" --> DFAIL["Ready=False / DeleteFailed"]
+  DFAIL --> END
+  DS -- "Yes" --> OK["status.inventory = desired refs"]
+  OK --> READY["Ready=True / BindingRecorded"]
+  READY --> END
+```
+
 ## Project Notes
 
 - Design lives in `docs/design/namespaceclass-design.md`.
