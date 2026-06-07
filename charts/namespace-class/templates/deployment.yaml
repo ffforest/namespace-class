@@ -31,6 +31,9 @@ spec:
 {{- range .Values.manager.args }}
             - {{ . | quote }}
 {{- end }}
+{{- if .Values.manager.reconcileInterval }}
+            - {{ printf "--reconcile-interval=%s" .Values.manager.reconcileInterval | quote }}
+{{- end }}
 {{- if .Values.policy.allowGVKs }}
             - {{ printf "--policy-allow-gvks=%s" (join "," .Values.policy.allowGVKs) | quote }}
 {{- end }}

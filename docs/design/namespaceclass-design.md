@@ -612,11 +612,11 @@ controller 需要判断资源是 namespaced 还是 cluster-scoped。这个判断
 应对：
 
 1. 默认不使用 force apply。
-2. 对每个 desired resource 独立 apply；某个资源 conflict 不应阻塞其他资源处理。
+2. 对每个 desired resource 使用 server-side apply；已经成功 apply 的资源会被记录进临时 inventory。
 3. 将冲突记录到 `NamespaceClassBinding.status.conditions`，reason 使用 `ApplyConflict`。
 4. 对冲突资源不强制覆盖，不把从未成功 apply 的新增冲突资源写入 inventory。
 5. 已经在旧 inventory 中的资源继续保留 inventory 记录，避免后续失去 ownership 线索。
-6. stale resource 删除仍然执行，但只删除 inventory 中确认由 controller 管理、且不在 desired set 里的对象。
+6. 如果 apply 阶段失败，stale resource 删除会推迟到下一次成功 reconcile；这样避免 class 切换时先删除旧资源、但新 class 资源没有完整创建。
 7. 可以提供可选配置 `forceConflicts: true`，但默认关闭；force 模式应标记为高风险，因为它会覆盖其他 field manager 的字段。
 
 ### 13.12 RBAC 权限不足

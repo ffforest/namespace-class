@@ -12,6 +12,7 @@ serviceAccount:
 manager:
   args:
     - --leader-elect
+  reconcileInterval: 5m
   resources: {}
 
 policy:

@@ -37,3 +37,10 @@
 - Added runtime GVK policy guard with allow-all default plus `ClusterRoleBinding` denylist, configurable allow/deny GVK flags, Helm values, and `Ready=False` / `GVKDenied` binding status.
 - Upgraded unit tests, envtest, and smoke to verify the default policy denies `ClusterRoleBinding` and prevents controller-mediated privilege escalation.
 - Added `make rbac-check` to inspect the deployed controller ServiceAccount RBAC, fail on missing required permissions, and warn on broad/high-risk permissions such as wildcard RBAC and `ClusterRoleBinding` creation.
+- Added stable `NamespaceClassBinding` failure status for unmanaged existing resources, unknown GVK/discovery failures, SSA apply conflicts, duplicate desired resource identities, partial apply failures, and delete failures.
+- Removed default server-side apply force ownership so field-manager conflicts are surfaced as `Ready=False` / `ApplyConflict`.
+- Made partial apply inventory durable by preserving already-applied resources in binding status when a later apply fails.
+- Wired the small template renderer into controller reconciliation with `.Namespace.Name`, `.Namespace.UID`, and `.Class.Name` support.
+- Added first-slice drift repair through `NamespaceClassBinding` delete/update watch plus periodic namespace requeue, without dynamic informers for managed resources.
+- Upgraded envtest coverage for unmanaged conflicts, SSA conflicts, partial apply, unknown GVK, duplicate desired identities, damaged inventory, template rendering, binding deletion drift, and periodic managed-resource repair.
+- Upgraded smoke to verify the controller recreates a deleted `NamespaceClassBinding` for a still-labeled namespace.

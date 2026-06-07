@@ -102,6 +102,22 @@ YAML
     exit 1
   fi
 
+  echo "Checking controller recreates deleted NamespaceClassBinding"
+  kubectl delete namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
+  for ((i = 0; i < wait_seconds; i++)); do
+    if kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      recreated_class="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.spec.className}')"
+      if [[ "$recreated_class" == "$BEHAVIOR_SMOKE_NAME" ]]; then
+        break
+      fi
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected NamespaceClassBinding $BEHAVIOR_SMOKE_NAME to be recreated after deletion" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
   echo "Checking controller automatically reconciles NamespaceClass updates"
   kubectl apply -f - <<YAML
 apiVersion: namespaceclass.akuity.io/v1alpha1

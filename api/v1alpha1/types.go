@@ -15,11 +15,15 @@ const (
 	NamespaceLabelOwnerKey   = "namespaceclass.akuity.io/namespace"
 	OwnerNamespaceUIDAnnoKey = "namespaceclass.akuity.io/owner-namespace-uid"
 
-	ConditionReady        = "Ready"
-	ReasonBindingRecorded = "BindingRecorded"
-	ReasonClassNotFound   = "ClassNotFound"
-	ReasonCleanupFailed   = "CleanupFailed"
-	ReasonGVKDenied       = "GVKDenied"
+	ConditionReady          = "Ready"
+	ReasonBindingRecorded   = "BindingRecorded"
+	ReasonClassNotFound     = "ClassNotFound"
+	ReasonCleanupFailed     = "CleanupFailed"
+	ReasonGVKDenied         = "GVKDenied"
+	ReasonApplyConflict     = "ApplyConflict"
+	ReasonApplyFailed       = "ApplyFailed"
+	ReasonDeleteFailed      = "DeleteFailed"
+	ReasonDuplicateResource = "DuplicateResource"
 )
 
 type NamespaceClassSpec struct {

@@ -25,7 +25,8 @@
 - Runtime GVK policy defaults to allow-all plus denylist, with `rbac.authorization.k8s.io/v1/ClusterRoleBinding` denied by default. Denylist wins over allowlist; when allowlist is non-empty, unmanaged GVKs outside the allowlist are denied. Admission webhook enforcement is planned but not installed yet.
 - Template support is intentionally small: string substitution only, with no loops, conditionals, functions, external lookups, or cross-resource references.
 - Safety risks from arbitrary resources are handled with RBAC boundaries, ownership markers, GVK policy, explicit status, and planned admission validation.
-- First implementation does not dynamically watch every managed GVK. Drift is repaired through primary-object watches and periodic resync.
+- Server-side apply does not use force ownership by default. Existing unmanaged resources and field-manager conflicts are reported on `NamespaceClassBinding` instead of being overwritten.
+- First implementation does not dynamically watch every managed GVK. Drift repair uses `Namespace`, `NamespaceClass`, and `NamespaceClassBinding` watches plus a simple periodic requeue; dynamic informers for arbitrary managed resources are deferred.
 - `NamespaceClass` missing/deleted cleanup treats the desired set as empty; cleanup success deletes the binding, while cleanup failure keeps the binding with a `CleanupFailed` condition for retry.
 - The repository has a working envtest harness. `make envtest` starts a real API server and etcd, installs project CRDs, and validates CRD/status behavior.
 - `make check` is the aggregate local verification entry point and includes unit tests, envtest, vet, manifest checks, and Helm rendering.

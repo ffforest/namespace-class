@@ -33,6 +33,11 @@ var clusterRoleBindingGVK = schema.GroupVersionKind{
 	Kind:    "ClusterRoleBinding",
 }
 
+var configMapGVK = schema.GroupVersionKind{
+	Version: "v1",
+	Kind:    "ConfigMap",
+}
+
 func TestNamespaceClassBindingIsCreatedForLabeledNamespace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -930,6 +935,543 @@ func TestDefaultGVKPolicyDeniesClusterRoleBinding(t *testing.T) {
 		t.Fatal("expected observedNamespaceUID to be recorded")
 	}
 	waitForObjectDeleted(t, ctx, kubeClient, clusterRoleBindingGVK, "", "web-portal-cluster-admin")
+}
+
+func TestUnmanagedExistingResourceConflictSetsApplyConflict(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	unmanagedServiceAccount := newUnstructured(serviceAccountGVK, "web-portal", "public-app")
+	if err := kubeClient.Create(ctx, unmanagedServiceAccount); err != nil {
+		t.Fatalf("create unmanaged serviceaccount: %v", err)
+	}
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "public-app",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	labelNamespaceClass(t, ctx, kubeClient, "web-portal", "public-network")
+	binding := waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "ApplyConflict")
+	if hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "public-app") {
+		t.Fatalf("expected unmanaged conflicting resource not to be recorded in inventory, got %#v", binding.Object["status"])
+	}
+}
+
+func TestServerSideApplyConflictSetsApplyConflict(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	createManagedConfigMapWithFieldOwner(t, ctx, kubeClient, namespace, "public-config", "other-manager", map[string]interface{}{
+		"mode": "other",
+	})
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name": "public-config",
+			},
+			"data": map[string]interface{}{
+				"mode": "controller",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	labelNamespaceClass(t, ctx, kubeClient, "web-portal", "public-network")
+	waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "ApplyConflict")
+
+	configMap := waitForObject(t, ctx, kubeClient, configMapGVK, "web-portal", "public-config")
+	if got := nestedString(t, configMap, "data", "mode"); got != "other" {
+		t.Fatalf("expected other field manager value to remain, got %q", got)
+	}
+}
+
+func TestPartialApplyFailureRecordsSuccessfulInventory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	createManagedConfigMapWithFieldOwner(t, ctx, kubeClient, namespace, "conflicting-config", "other-manager", map[string]interface{}{
+		"mode": "other",
+	})
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name": "first-config",
+			},
+			"data": map[string]interface{}{
+				"mode": "created",
+			},
+		},
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name": "conflicting-config",
+			},
+			"data": map[string]interface{}{
+				"mode": "controller",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	labelNamespaceClass(t, ctx, kubeClient, "web-portal", "public-network")
+	binding := waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "ApplyConflict")
+	waitForObject(t, ctx, kubeClient, configMapGVK, "web-portal", "first-config")
+	if !hasInventoryEntry(t, binding, "v1", "ConfigMap", "web-portal", "first-config") {
+		t.Fatalf("expected successfully applied resource to be recorded in inventory, got %#v", binding.Object["status"])
+	}
+}
+
+func TestUnknownGVKSetsApplyFailed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "example.com/v1",
+			"kind":       "MissingKind",
+			"metadata": map[string]interface{}{
+				"name": "missing",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "ApplyFailed")
+}
+
+func TestDuplicateDesiredIdentitySetsDuplicateResource(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "duplicate-app",
+			},
+		},
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "duplicate-app",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "DuplicateResource")
+}
+
+func TestLabelRemovalDeleteFailureSetsDeleteFailed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	createNamespaceClassWithServiceAccount(t, ctx, kubeClient, "public-network", "public-app")
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	serviceAccount := waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+
+	labels := serviceAccount.GetLabels()
+	delete(labels, "namespaceclass.akuity.io/managed")
+	serviceAccount.SetLabels(labels)
+	if err := kubeClient.Update(ctx, serviceAccount); err != nil {
+		t.Fatalf("remove managed label: %v", err)
+	}
+
+	namespace = newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, namespace); err != nil {
+		t.Fatalf("get namespace: %v", err)
+	}
+	labels = namespace.GetLabels()
+	delete(labels, "namespaceclass.akuity.io/name")
+	namespace.SetLabels(labels)
+	if err := kubeClient.Update(ctx, namespace); err != nil {
+		t.Fatalf("remove namespace class label: %v", err)
+	}
+
+	waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "DeleteFailed")
+}
+
+func TestLabelRemovalDeleteFailureRetriesCleanupPeriodically(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, func(options *ncmanager.Options) {
+		options.ReconcileInterval = 200 * time.Millisecond
+	})
+
+	createNamespaceClassWithServiceAccount(t, ctx, kubeClient, "public-network", "public-app")
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	serviceAccount := waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+
+	labels := serviceAccount.GetLabels()
+	delete(labels, "namespaceclass.akuity.io/managed")
+	serviceAccount.SetLabels(labels)
+	if err := kubeClient.Update(ctx, serviceAccount); err != nil {
+		t.Fatalf("remove managed label: %v", err)
+	}
+
+	namespace = newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, namespace); err != nil {
+		t.Fatalf("get namespace: %v", err)
+	}
+	labels = namespace.GetLabels()
+	delete(labels, "namespaceclass.akuity.io/name")
+	namespace.SetLabels(labels)
+	if err := kubeClient.Update(ctx, namespace); err != nil {
+		t.Fatalf("remove namespace class label: %v", err)
+	}
+	waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "DeleteFailed")
+
+	serviceAccount = waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	labels = serviceAccount.GetLabels()
+	labels["namespaceclass.akuity.io/managed"] = "true"
+	serviceAccount.SetLabels(labels)
+	if err := kubeClient.Update(ctx, serviceAccount); err != nil {
+		t.Fatalf("restore managed label: %v", err)
+	}
+
+	waitForObjectDeleted(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	waitForBindingDeleted(t, ctx, kubeClient, "web-portal")
+}
+
+func TestDamagedInventorySetsDeleteFailed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	createNamespaceClassWithServiceAccount(t, ctx, kubeClient, "public-network", "public-app")
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	binding := waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+
+	if err := unstructured.SetNestedSlice(binding.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "not/a/group/version",
+			"kind":       "ServiceAccount",
+			"namespace":  "web-portal",
+			"name":       "public-app",
+		},
+	}, "status", "inventory"); err != nil {
+		t.Fatalf("damage inventory: %v", err)
+	}
+	if err := kubeClient.Status().Update(ctx, binding); err != nil {
+		t.Fatalf("update damaged binding inventory: %v", err)
+	}
+
+	namespace = newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, namespace); err != nil {
+		t.Fatalf("get namespace: %v", err)
+	}
+	labels := namespace.GetLabels()
+	delete(labels, "namespaceclass.akuity.io/name")
+	namespace.SetLabels(labels)
+	if err := kubeClient.Update(ctx, namespace); err != nil {
+		t.Fatalf("remove namespace class label: %v", err)
+	}
+
+	waitForBindingCondition(t, ctx, kubeClient, "web-portal", "Ready", "False", "DeleteFailed")
+}
+
+func TestTemplatesAreRenderedBeforeApply(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "{{ .Namespace.Name }}-app",
+				"labels": map[string]interface{}{
+					"class": "{{ .Class.Name }}",
+				},
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	serviceAccount := waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "web-portal-app")
+	if got := serviceAccount.GetLabels()["class"]; got != "public-network" {
+		t.Fatalf("expected rendered class label, got %q", got)
+	}
+	binding := waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+	if !hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "web-portal-app") {
+		t.Fatalf("expected rendered ServiceAccount inventory entry, got %#v", binding.Object["status"])
+	}
+}
+
+func TestNamespaceClassBindingDeletionRequeuesNamespace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, nil)
+
+	createNamespaceClassWithServiceAccount(t, ctx, kubeClient, "public-network", "public-app")
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	binding := waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+	if err := kubeClient.Delete(ctx, binding); err != nil {
+		t.Fatalf("delete binding: %v", err)
+	}
+
+	waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+}
+
+func TestPeriodicRequeueRepairsDeletedManagedResource(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	kubeClient := startControllerEnvtest(t, ctx, func(options *ncmanager.Options) {
+		options.ReconcileInterval = 200 * time.Millisecond
+	})
+
+	createNamespaceClassWithServiceAccount(t, ctx, kubeClient, "public-network", "public-app")
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	serviceAccount := waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+	if err := kubeClient.Delete(ctx, serviceAccount); err != nil {
+		t.Fatalf("delete managed serviceaccount: %v", err)
+	}
+
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+}
+
+func startControllerEnvtest(t *testing.T, ctx context.Context, configure func(*ncmanager.Options)) client.Client {
+	t.Helper()
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join(repoRoot(t), "config", "crd", "bases")},
+	}
+	restConfig, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("start envtest: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := testEnv.Stop(); err != nil {
+			t.Fatalf("stop envtest: %v", err)
+		}
+	})
+
+	options := ncmanager.Options{
+		MetricsBindAddress:     "0",
+		HealthProbeBindAddress: freeLocalAddress(t),
+		LeaderElection:         false,
+	}
+	if configure != nil {
+		configure(&options)
+	}
+	mgr, err := ncmanager.New(restConfig, options)
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	managerCtx, stopManager := context.WithCancel(ctx)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mgr.Start(managerCtx)
+	}()
+	t.Cleanup(func() {
+		stopManager()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("manager returned error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("manager did not stop")
+		}
+	})
+
+	kubeClient, err := client.New(restConfig, client.Options{})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	return kubeClient
+}
+
+func createNamespaceClassWithServiceAccount(t *testing.T, ctx context.Context, kubeClient client.Client, className, serviceAccountName string) {
+	t.Helper()
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", className)
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": serviceAccountName,
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+}
+
+func labelNamespaceClass(t *testing.T, ctx context.Context, kubeClient client.Client, namespaceName, className string) {
+	t.Helper()
+
+	namespace := newUnstructured(namespaceGVK, "", namespaceName)
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: namespaceName}, namespace); err != nil {
+		t.Fatalf("get namespace for label: %v", err)
+	}
+	labels := namespace.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels["namespaceclass.akuity.io/name"] = className
+	namespace.SetLabels(labels)
+	if err := kubeClient.Update(ctx, namespace); err != nil {
+		t.Fatalf("label namespace: %v", err)
+	}
+}
+
+func createManagedConfigMapWithFieldOwner(t *testing.T, ctx context.Context, kubeClient client.Client, namespace *unstructured.Unstructured, name, fieldOwner string, data map[string]interface{}) {
+	t.Helper()
+
+	configMap := newUnstructured(configMapGVK, namespace.GetName(), name)
+	configMap.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/managed":   "true",
+		"namespaceclass.akuity.io/class":     "public-network",
+		"namespaceclass.akuity.io/namespace": namespace.GetName(),
+	})
+	configMap.SetAnnotations(map[string]string{
+		"namespaceclass.akuity.io/owner-namespace-uid": string(namespace.GetUID()),
+	})
+	if err := unstructured.SetNestedStringMap(configMap.Object, stringMapFromInterfaceMap(data), "data"); err != nil {
+		t.Fatalf("set configmap data: %v", err)
+	}
+	if err := kubeClient.Patch(ctx, configMap, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+		t.Fatalf("apply managed configmap with field owner %q: %v", fieldOwner, err)
+	}
+}
+
+func stringMapFromInterfaceMap(values map[string]interface{}) map[string]string {
+	result := map[string]string{}
+	for key, value := range values {
+		result[key] = value.(string)
+	}
+	return result
 }
 
 func waitForBinding(t *testing.T, ctx context.Context, kubeClient client.Client, name string) *unstructured.Unstructured {

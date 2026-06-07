@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"time"
 
 	namespaceclassv1alpha1 "github.com/forest/namespace-class/api/v1alpha1"
 	nccontroller "github.com/forest/namespace-class/internal/controller"
@@ -15,6 +16,7 @@ import (
 )
 
 const defaultLeaderElectionID = "namespace-class-controller.namespaceclass.akuity.io"
+const defaultReconcileInterval = 5 * time.Minute
 
 type Options struct {
 	MetricsBindAddress     string
@@ -23,6 +25,7 @@ type Options struct {
 	LeaderElectionID       string
 	PolicyAllowGVKs        string
 	PolicyDenyGVKs         string
+	ReconcileInterval      time.Duration
 }
 
 func DefaultOptions() Options {
@@ -32,6 +35,7 @@ func DefaultOptions() Options {
 		LeaderElection:         false,
 		LeaderElectionID:       defaultLeaderElectionID,
 		PolicyDenyGVKs:         policy.DefaultDenyGVKsCSV(),
+		ReconcileInterval:      defaultReconcileInterval,
 	}
 }
 
@@ -73,7 +77,7 @@ func New(restConfig *rest.Config, options Options) (ctrl.Manager, error) {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return nil, fmt.Errorf("add readyz check: %w", err)
 	}
-	if err := nccontroller.SetupNamespaceReconciler(mgr, resourcePolicy); err != nil {
+	if err := nccontroller.SetupNamespaceReconciler(mgr, resourcePolicy, options.ReconcileInterval); err != nil {
 		return nil, fmt.Errorf("setup namespace reconciler: %w", err)
 	}
 
@@ -93,6 +97,9 @@ func withDefaults(options Options) Options {
 	}
 	if options.PolicyDenyGVKs == "" {
 		options.PolicyDenyGVKs = defaults.PolicyDenyGVKs
+	}
+	if options.ReconcileInterval == 0 {
+		options.ReconcileInterval = defaults.ReconcileInterval
 	}
 	return options
 }

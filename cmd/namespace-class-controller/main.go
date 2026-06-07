@@ -21,6 +21,7 @@ func main() {
 	flag.StringVar(&options.LeaderElectionID, "leader-election-id", options.LeaderElectionID, "leader election lease name")
 	flag.StringVar(&options.PolicyAllowGVKs, "policy-allow-gvks", options.PolicyAllowGVKs, "comma-separated allowed managed resource GVKs; empty allows all except denylist")
 	flag.StringVar(&options.PolicyDenyGVKs, "policy-deny-gvks", options.PolicyDenyGVKs, "comma-separated denied managed resource GVKs")
+	flag.DurationVar(&options.ReconcileInterval, "reconcile-interval", options.ReconcileInterval, "periodic requeue interval for managed namespaces; use 0 to keep the default")
 	flag.Parse()
 
 	if *showVersion {
