@@ -21,3 +21,12 @@
 - Added envtest coverage that starts the manager and verifies a labeled namespace produces a Ready binding.
 - Extended minikube smoke to verify binding creation when the controller is deployed.
 - Changed local deploys to use unique timestamped image tags because reusing `namespace-class-controller:dev` can leave minikube running an older same-tag image.
+
+## 2026-06-07 Managed Resource Apply
+
+- Added dynamic rendering of raw `NamespaceClass.spec.resources` into `unstructured.Unstructured`.
+- Added RESTMapper-based scope resolution so namespaced resources are forced into the target namespace before apply.
+- Added server-side apply with a fixed field manager for managed resources.
+- Added ownership labels and namespace UID annotations to applied resources.
+- Added inventory status updates for successfully applied resources.
+- Extended envtest and minikube smoke to verify a managed `ServiceAccount` is created and recorded in `NamespaceClassBinding.status.inventory`.

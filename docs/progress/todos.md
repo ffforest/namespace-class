@@ -2,9 +2,8 @@
 
 ## Open
 
-- [ ] Extend namespace reconciliation from binding creation to dynamic client apply/delete for rendered managed resources.
-- [ ] Implement binding status inventory updates.
-- [ ] Expand envtest coverage for managed resource behavior: resource creation, class switching, class update, and deletion cleanup.
+- [ ] Extend namespace reconciliation from apply-only behavior to stale managed resource delete for resources absent from the current desired set.
+- [ ] Expand envtest coverage for managed resource behavior: class switching, class update, and deletion cleanup.
 - [ ] Decide first-slice admission webhook scope.
 - [ ] Replace Helm chart placeholder image defaults with the final image build/publish flow.
 
@@ -12,7 +11,7 @@
 
 ### High
 
-- [ ] Upgrade `make smoke` beyond binding creation to managed-resource e2e behavior: verify managed resources, switch class, verify old resources are removed and new resources are created, then clean up.
+- [ ] Upgrade `make smoke` beyond managed-resource creation to switching and cleanup behavior: switch class, verify old resources are removed and new resources are created, then clean up.
 - [ ] Decide and document namespace finalizer behavior for cluster-scoped managed resources. Recommended decision: when cluster-scoped resources are supported, the controller must add a namespace finalizer so cluster-scoped cleanup can complete before namespace deletion finishes.
 - [ ] Clarify `NamespaceClass` missing/deleted binding lifecycle. Recommended decision: cleanup succeeds -> delete binding; cleanup fails -> keep binding with a condition such as `ClassNotFound` or `CleanupFailed`.
 

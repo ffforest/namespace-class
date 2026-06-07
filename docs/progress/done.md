@@ -19,3 +19,6 @@
 - Added namespace reconciliation for the first business slice: labeled namespaces now create or update cluster-scoped `NamespaceClassBinding` objects with basic Ready status.
 - Upgraded smoke to create a temporary `NamespaceClass` and labeled `Namespace`, wait for `NamespaceClassBinding` Ready, verify binding fields, and clean up.
 - Changed `make deploy-local` to use a unique timestamped local image tag so minikube does not keep running an older same-tag image.
+- Added dynamic server-side apply for rendered `NamespaceClass.spec.resources`, starting with namespaced resources such as `ServiceAccount`.
+- Added managed-resource inventory updates in `NamespaceClassBinding.status.inventory` for successfully applied resources.
+- Upgraded envtest and smoke to verify a managed `ServiceAccount` is created and recorded in binding inventory.

@@ -2,28 +2,36 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 
 	namespaceclassv1alpha1 "github.com/forest/namespace-class/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 )
 
+const fieldManager = "namespace-class-controller"
+
 type NamespaceReconciler struct {
 	client.Client
-	APIReader client.Reader
+	APIReader  client.Reader
+	RESTMapper meta.RESTMapper
 }
 
 func SetupNamespaceReconciler(mgr ctrl.Manager) error {
 	skipNameValidation := true
 	reconciler := &NamespaceReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
+		Client:     mgr.GetClient(),
+		APIReader:  mgr.GetAPIReader(),
+		RESTMapper: mgr.GetRESTMapper(),
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("namespaceclass-binding").
@@ -57,7 +65,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 }
 
 func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *corev1.Namespace, className string) error {
-	observedClassGeneration, condition := r.classCondition(ctx, className)
+	namespaceClass, observedClassGeneration, condition := r.classCondition(ctx, className)
 
 	bindingName := namespace.Name
 	binding := &namespaceclassv1alpha1.NamespaceClassBinding{}
@@ -96,8 +104,18 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 		}
 	}
 
+	inventory := []namespaceclassv1alpha1.ResourceRef{}
+	if namespaceClass != nil {
+		refs, err := r.applyManagedResources(ctx, namespace, namespaceClass)
+		if err != nil {
+			return err
+		}
+		inventory = refs
+	}
+
 	binding.Status.ObservedNamespaceUID = string(namespace.UID)
 	binding.Status.ObservedClassGeneration = observedClassGeneration
+	binding.Status.Inventory = inventory
 	condition.ObservedGeneration = binding.Generation
 	meta.SetStatusCondition(&binding.Status.Conditions, condition)
 	if err := r.Status().Update(ctx, binding); err != nil {
@@ -107,18 +125,137 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 	return nil
 }
 
-func (r *NamespaceReconciler) classCondition(ctx context.Context, className string) (int64, metav1.Condition) {
+func (r *NamespaceReconciler) applyManagedResources(ctx context.Context, namespace *corev1.Namespace, namespaceClass *namespaceclassv1alpha1.NamespaceClass) ([]namespaceclassv1alpha1.ResourceRef, error) {
+	refs := []namespaceclassv1alpha1.ResourceRef{}
+	for index, raw := range namespaceClass.Spec.Resources {
+		object, err := rawToUnstructured(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse resource %d: %w", index, err)
+		}
+
+		ref, err := r.prepareManagedResource(ctx, object, namespace, namespaceClass.Name)
+		if err != nil {
+			return nil, fmt.Errorf("prepare %s/%s: %w", object.GetKind(), object.GetName(), err)
+		}
+
+		if err := r.Patch(ctx, object, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+			return nil, fmt.Errorf("apply %s/%s: %w", object.GetKind(), object.GetName(), err)
+		}
+		refs = append(refs, ref)
+	}
+
+	sort.Slice(refs, func(i, j int) bool {
+		left := refs[i]
+		right := refs[j]
+		return fmt.Sprintf("%s/%s/%s/%s", left.APIVersion, left.Kind, left.Namespace, left.Name) <
+			fmt.Sprintf("%s/%s/%s/%s", right.APIVersion, right.Kind, right.Namespace, right.Name)
+	})
+	return refs, nil
+}
+
+func rawToUnstructured(raw runtime.RawExtension) (*unstructured.Unstructured, error) {
+	if len(raw.Raw) == 0 {
+		if raw.Object == nil {
+			return nil, fmt.Errorf("resource body is empty")
+		}
+		content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(raw.Object)
+		if err != nil {
+			return nil, fmt.Errorf("convert object: %w", err)
+		}
+		return &unstructured.Unstructured{Object: content}, nil
+	}
+
+	object := &unstructured.Unstructured{}
+	if err := json.Unmarshal(raw.Raw, &object.Object); err != nil {
+		return nil, fmt.Errorf("unmarshal raw object: %w", err)
+	}
+	return object, nil
+}
+
+func (r *NamespaceReconciler) prepareManagedResource(ctx context.Context, object *unstructured.Unstructured, namespace *corev1.Namespace, className string) (namespaceclassv1alpha1.ResourceRef, error) {
+	gvk := object.GroupVersionKind()
+	if gvk.Empty() || gvk.Kind == "" {
+		return namespaceclassv1alpha1.ResourceRef{}, fmt.Errorf("apiVersion and kind are required")
+	}
+	if object.GetName() == "" {
+		return namespaceclassv1alpha1.ResourceRef{}, fmt.Errorf("metadata.name is required")
+	}
+
+	mapping, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return namespaceclassv1alpha1.ResourceRef{}, fmt.Errorf("resolve REST mapping: %w", err)
+	}
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		object.SetNamespace(namespace.Name)
+	} else {
+		object.SetNamespace("")
+	}
+
+	if err := r.ensureCanManage(ctx, object, namespace); err != nil {
+		return namespaceclassv1alpha1.ResourceRef{}, err
+	}
+	addManagedMetadata(object, namespace, className)
+	object.SetResourceVersion("")
+	object.SetManagedFields(nil)
+
+	return namespaceclassv1alpha1.ResourceRef{
+		APIVersion: object.GetAPIVersion(),
+		Kind:       object.GetKind(),
+		Namespace:  object.GetNamespace(),
+		Name:       object.GetName(),
+	}, nil
+}
+
+func (r *NamespaceReconciler) ensureCanManage(ctx context.Context, desired *unstructured.Unstructured, namespace *corev1.Namespace) error {
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(desired.GroupVersionKind())
+	key := client.ObjectKey{Namespace: desired.GetNamespace(), Name: desired.GetName()}
+	if err := r.APIReader.Get(ctx, key, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get existing resource: %w", err)
+	}
+
+	labels := existing.GetLabels()
+	annotations := existing.GetAnnotations()
+	if labels[namespaceclassv1alpha1.ManagedLabelKey] != "true" ||
+		annotations[namespaceclassv1alpha1.OwnerNamespaceUIDAnnoKey] != string(namespace.UID) {
+		return fmt.Errorf("resource already exists and is not owned by this NamespaceClass binding")
+	}
+	return nil
+}
+
+func addManagedMetadata(object *unstructured.Unstructured, namespace *corev1.Namespace, className string) {
+	labels := object.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[namespaceclassv1alpha1.ManagedLabelKey] = "true"
+	labels[namespaceclassv1alpha1.ClassLabelOwnerKey] = className
+	labels[namespaceclassv1alpha1.NamespaceLabelOwnerKey] = namespace.Name
+	object.SetLabels(labels)
+
+	annotations := object.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[namespaceclassv1alpha1.OwnerNamespaceUIDAnnoKey] = string(namespace.UID)
+	object.SetAnnotations(annotations)
+}
+
+func (r *NamespaceReconciler) classCondition(ctx context.Context, className string) (*namespaceclassv1alpha1.NamespaceClass, int64, metav1.Condition) {
 	namespaceClass := &namespaceclassv1alpha1.NamespaceClass{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: className}, namespaceClass); err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, metav1.Condition{
+			return nil, 0, metav1.Condition{
 				Type:    namespaceclassv1alpha1.ConditionReady,
 				Status:  metav1.ConditionFalse,
 				Reason:  namespaceclassv1alpha1.ReasonClassNotFound,
 				Message: fmt.Sprintf("NamespaceClass %q was not found", className),
 			}
 		}
-		return 0, metav1.Condition{
+		return nil, 0, metav1.Condition{
 			Type:    namespaceclassv1alpha1.ConditionReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  "ClassReadFailed",
@@ -126,7 +263,7 @@ func (r *NamespaceReconciler) classCondition(ctx context.Context, className stri
 		}
 	}
 
-	return namespaceClass.Generation, metav1.Condition{
+	return namespaceClass, namespaceClass.Generation, metav1.Condition{
 		Type:    namespaceclassv1alpha1.ConditionReady,
 		Status:  metav1.ConditionTrue,
 		Reason:  namespaceclassv1alpha1.ReasonBindingRecorded,

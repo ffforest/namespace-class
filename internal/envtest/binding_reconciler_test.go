@@ -10,9 +10,15 @@ import (
 
 	ncmanager "github.com/forest/namespace-class/internal/manager"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
+
+var serviceAccountGVK = schema.GroupVersionKind{
+	Version: "v1",
+	Kind:    "ServiceAccount",
+}
 
 func TestNamespaceClassBindingIsCreatedForLabeledNamespace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -95,6 +101,88 @@ func TestNamespaceClassBindingIsCreatedForLabeledNamespace(t *testing.T) {
 	}
 }
 
+func TestNamespaceClassResourcesAreAppliedAndRecordedInInventory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join(repoRoot(t), "config", "crd", "bases")},
+	}
+
+	restConfig, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("start envtest: %v", err)
+	}
+	defer func() {
+		if err := testEnv.Stop(); err != nil {
+			t.Fatalf("stop envtest: %v", err)
+		}
+	}()
+
+	mgr, err := ncmanager.New(restConfig, ncmanager.Options{
+		MetricsBindAddress:     "0",
+		HealthProbeBindAddress: freeLocalAddress(t),
+		LeaderElection:         false,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	managerCtx, stopManager := context.WithCancel(ctx)
+	defer stopManager()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mgr.Start(managerCtx)
+	}()
+	defer func() {
+		stopManager()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("manager returned error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("manager did not stop")
+		}
+	}()
+
+	kubeClient, err := client.New(restConfig, client.Options{})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "public-app",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+
+	binding := waitForBinding(t, ctx, kubeClient, "web-portal")
+	if !hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "public-app") {
+		t.Fatalf("expected ServiceAccount inventory entry, got %#v", binding.Object["status"])
+	}
+}
+
 func waitForBinding(t *testing.T, ctx context.Context, kubeClient client.Client, name string) *unstructured.Unstructured {
 	t.Helper()
 
@@ -144,6 +232,47 @@ func hasCondition(t *testing.T, object *unstructured.Unstructured, conditionType
 			continue
 		}
 		if condition["type"] == conditionType && condition["status"] == status && condition["reason"] == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForObject(t *testing.T, ctx context.Context, kubeClient client.Client, gvk schema.GroupVersionKind, namespace, name string) *unstructured.Unstructured {
+	t.Helper()
+
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		object := newUnstructured(gvk, namespace, name)
+		err := kubeClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, object)
+		if err == nil {
+			return object
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("%s %s/%s was not created: %v", gvk.Kind, namespace, name, lastErr)
+	return nil
+}
+
+func hasInventoryEntry(t *testing.T, object *unstructured.Unstructured, apiVersion, kind, namespace, name string) bool {
+	t.Helper()
+
+	inventory, found, err := unstructured.NestedSlice(object.Object, "status", "inventory")
+	if err != nil {
+		t.Fatalf("read status.inventory: %v", err)
+	}
+	if !found {
+		return false
+	}
+	for _, item := range inventory {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if entry["apiVersion"] == apiVersion && entry["kind"] == kind && entry["namespace"] == namespace && entry["name"] == name {
 			return true
 		}
 	}

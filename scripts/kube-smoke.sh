@@ -11,6 +11,7 @@ CONTROLLER_WAIT_TIMEOUT="${CONTROLLER_WAIT_TIMEOUT:-120s}"
 
 cleanup_behavior_smoke() {
   if [[ -n "${BEHAVIOR_SMOKE_NAME:-}" ]]; then
+    kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME"
@@ -44,7 +45,11 @@ kind: NamespaceClass
 metadata:
   name: $BEHAVIOR_SMOKE_NAME
 spec:
-  resources: []
+  resources:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: $BEHAVIOR_SMOKE_NAME-app
 ---
 apiVersion: v1
 kind: Namespace
@@ -74,6 +79,17 @@ YAML
   observed_uid="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.status.observedNamespaceUID}')"
   if [[ -z "$observed_uid" ]]; then
     echo "expected binding status.observedNamespaceUID to be set" >&2
+    exit 1
+  fi
+  kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME"
+  inventory_name="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.status.inventory[0].name}')"
+  if [[ "$inventory_name" != "$BEHAVIOR_SMOKE_NAME-app" ]]; then
+    echo "expected first inventory entry to be $BEHAVIOR_SMOKE_NAME-app, got $inventory_name" >&2
+    exit 1
+  fi
+  inventory_namespace="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.status.inventory[0].namespace}')"
+  if [[ "$inventory_namespace" != "$BEHAVIOR_SMOKE_NAME" ]]; then
+    echo "expected first inventory entry namespace to be $BEHAVIOR_SMOKE_NAME, got $inventory_namespace" >&2
     exit 1
   fi
 else

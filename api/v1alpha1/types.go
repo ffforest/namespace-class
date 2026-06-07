@@ -8,6 +8,11 @@ import (
 const (
 	ClassLabelKey = "namespaceclass.akuity.io/name"
 
+	ManagedLabelKey          = "namespaceclass.akuity.io/managed"
+	ClassLabelOwnerKey       = "namespaceclass.akuity.io/class"
+	NamespaceLabelOwnerKey   = "namespaceclass.akuity.io/namespace"
+	OwnerNamespaceUIDAnnoKey = "namespaceclass.akuity.io/owner-namespace-uid"
+
 	ConditionReady        = "Ready"
 	ReasonBindingRecorded = "BindingRecorded"
 	ReasonClassNotFound   = "ClassNotFound"
