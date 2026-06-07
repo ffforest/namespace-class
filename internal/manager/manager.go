@@ -5,6 +5,7 @@ import (
 
 	namespaceclassv1alpha1 "github.com/forest/namespace-class/api/v1alpha1"
 	nccontroller "github.com/forest/namespace-class/internal/controller"
+	"github.com/forest/namespace-class/internal/policy"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -20,6 +21,8 @@ type Options struct {
 	HealthProbeBindAddress string
 	LeaderElection         bool
 	LeaderElectionID       string
+	PolicyAllowGVKs        string
+	PolicyDenyGVKs         string
 }
 
 func DefaultOptions() Options {
@@ -28,6 +31,7 @@ func DefaultOptions() Options {
 		HealthProbeBindAddress: ":8081",
 		LeaderElection:         false,
 		LeaderElectionID:       defaultLeaderElectionID,
+		PolicyDenyGVKs:         policy.DefaultDenyGVKsCSV(),
 	}
 }
 
@@ -44,6 +48,10 @@ func New(restConfig *rest.Config, options Options) (ctrl.Manager, error) {
 	}
 	if err := namespaceclassv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("add namespaceclass scheme: %w", err)
+	}
+	resourcePolicy, err := policy.FromCSV(options.PolicyAllowGVKs, options.PolicyDenyGVKs)
+	if err != nil {
+		return nil, fmt.Errorf("build GVK policy: %w", err)
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
@@ -65,7 +73,7 @@ func New(restConfig *rest.Config, options Options) (ctrl.Manager, error) {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return nil, fmt.Errorf("add readyz check: %w", err)
 	}
-	if err := nccontroller.SetupNamespaceReconciler(mgr); err != nil {
+	if err := nccontroller.SetupNamespaceReconciler(mgr, resourcePolicy); err != nil {
 		return nil, fmt.Errorf("setup namespace reconciler: %w", err)
 	}
 
@@ -82,6 +90,9 @@ func withDefaults(options Options) Options {
 	}
 	if options.LeaderElectionID == "" {
 		options.LeaderElectionID = defaults.LeaderElectionID
+	}
+	if options.PolicyDenyGVKs == "" {
+		options.PolicyDenyGVKs = defaults.PolicyDenyGVKs
 	}
 	return options
 }

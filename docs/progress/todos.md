@@ -2,7 +2,7 @@
 
 ## Open
 
-- [ ] Decide first-slice admission webhook scope.
+- [ ] Implement admission webhook deployment, TLS certificate generation/rotation, and caBundle injection after the runtime GVK guard.
 - [ ] Replace Helm chart placeholder image defaults with the final image build/publish flow.
 
 ## Harness / Design Review Backlog
@@ -17,7 +17,6 @@ No open high-priority harness/design items.
 - [ ] Add dependency drift targets such as `make mod-tidy` and `make mod-check`, and include the check in the aggregate verification path.
 - [ ] Add `make scripts-check` for shell and Ruby syntax checks, then include it in `make check`.
 - [ ] Add RBAC feedback with a target such as `make rbac-check`, using `kubectl auth can-i` for the controller service account and key resource operations.
-- [ ] Decide first-slice GVK policy semantics. Recommended first slice: runtime policy defaults to allow all, mark it high risk in docs, and defer enforceable allowlist/denylist admission to a later slice.
 - [ ] Tighten template variable scope. Recommended first slice: support only `.Namespace.Name`, `.Namespace.UID`, and `.Class.Name`; defer labels/annotations until escaping and key lookup syntax are defined.
 
 ### Low

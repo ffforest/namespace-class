@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
 	namespaceclassv1alpha1 "github.com/forest/namespace-class/api/v1alpha1"
+	"github.com/forest/namespace-class/internal/policy"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -29,11 +31,12 @@ const bindingClassNameField = "spec.className"
 
 type NamespaceReconciler struct {
 	client.Client
-	APIReader  client.Reader
-	RESTMapper meta.RESTMapper
+	APIReader      client.Reader
+	RESTMapper     meta.RESTMapper
+	ResourcePolicy policy.Policy
 }
 
-func SetupNamespaceReconciler(mgr ctrl.Manager) error {
+func SetupNamespaceReconciler(mgr ctrl.Manager, resourcePolicy policy.Policy) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &namespaceclassv1alpha1.NamespaceClassBinding{}, bindingClassNameField, func(object client.Object) []string {
 		binding, ok := object.(*namespaceclassv1alpha1.NamespaceClassBinding)
 		if !ok || binding.Spec.ClassName == "" {
@@ -46,9 +49,10 @@ func SetupNamespaceReconciler(mgr ctrl.Manager) error {
 
 	skipNameValidation := true
 	reconciler := &NamespaceReconciler{
-		Client:     mgr.GetClient(),
-		APIReader:  mgr.GetAPIReader(),
-		RESTMapper: mgr.GetRESTMapper(),
+		Client:         mgr.GetClient(),
+		APIReader:      mgr.GetAPIReader(),
+		RESTMapper:     mgr.GetRESTMapper(),
+		ResourcePolicy: resourcePolicy,
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("namespaceclass-binding").
@@ -250,6 +254,21 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 
 	inventory, err := r.applyManagedResources(ctx, namespace, namespaceClass)
 	if err != nil {
+		var deniedErr *policy.DeniedError
+		if errors.As(err, &deniedErr) {
+			binding.Status.ObservedNamespaceUID = string(namespace.UID)
+			binding.Status.ObservedClassGeneration = observedClassGeneration
+			binding.Status.Inventory = previousInventory
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = namespaceclassv1alpha1.ReasonGVKDenied
+			condition.Message = err.Error()
+			condition.ObservedGeneration = binding.Generation
+			meta.SetStatusCondition(&binding.Status.Conditions, condition)
+			if statusErr := r.Status().Update(ctx, binding); statusErr != nil {
+				return fmt.Errorf("update namespaceclassbinding policy denied status: %w", statusErr)
+			}
+			return nil
+		}
 		return err
 	}
 	if err := r.deleteStaleManagedResources(ctx, namespace, previousInventory, inventory); err != nil {
@@ -316,7 +335,32 @@ func hasNamespaceFinalizer(namespace *corev1.Namespace) bool {
 }
 
 func (r *NamespaceReconciler) applyManagedResources(ctx context.Context, namespace *corev1.Namespace, namespaceClass *namespaceclassv1alpha1.NamespaceClass) ([]namespaceclassv1alpha1.ResourceRef, error) {
-	refs := []namespaceclassv1alpha1.ResourceRef{}
+	resources, err := r.prepareManagedResources(ctx, namespace, namespaceClass)
+	if err != nil {
+		return nil, err
+	}
+
+	refs := make([]namespaceclassv1alpha1.ResourceRef, 0, len(resources))
+	for _, resource := range resources {
+		if err := r.Patch(ctx, resource.object, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+			return nil, fmt.Errorf("apply %s/%s: %w", resource.object.GetKind(), resource.object.GetName(), err)
+		}
+		refs = append(refs, resource.ref)
+	}
+
+	sort.Slice(refs, func(i, j int) bool {
+		return resourceRefKey(refs[i]) < resourceRefKey(refs[j])
+	})
+	return refs, nil
+}
+
+type preparedManagedResource struct {
+	object *unstructured.Unstructured
+	ref    namespaceclassv1alpha1.ResourceRef
+}
+
+func (r *NamespaceReconciler) prepareManagedResources(ctx context.Context, namespace *corev1.Namespace, namespaceClass *namespaceclassv1alpha1.NamespaceClass) ([]preparedManagedResource, error) {
+	resources := []preparedManagedResource{}
 	for index, raw := range namespaceClass.Spec.Resources {
 		object, err := rawToUnstructured(raw)
 		if err != nil {
@@ -327,17 +371,10 @@ func (r *NamespaceReconciler) applyManagedResources(ctx context.Context, namespa
 		if err != nil {
 			return nil, fmt.Errorf("prepare %s/%s: %w", object.GetKind(), object.GetName(), err)
 		}
-
-		if err := r.Patch(ctx, object, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
-			return nil, fmt.Errorf("apply %s/%s: %w", object.GetKind(), object.GetName(), err)
-		}
-		refs = append(refs, ref)
+		resources = append(resources, preparedManagedResource{object: object, ref: ref})
 	}
 
-	sort.Slice(refs, func(i, j int) bool {
-		return resourceRefKey(refs[i]) < resourceRefKey(refs[j])
-	})
-	return refs, nil
+	return resources, nil
 }
 
 func (r *NamespaceReconciler) deleteStaleManagedResources(ctx context.Context, namespace *corev1.Namespace, previousInventory, desiredInventory []namespaceclassv1alpha1.ResourceRef) error {
@@ -414,6 +451,9 @@ func (r *NamespaceReconciler) prepareManagedResource(ctx context.Context, object
 	}
 	if object.GetName() == "" {
 		return namespaceclassv1alpha1.ResourceRef{}, fmt.Errorf("metadata.name is required")
+	}
+	if err := r.ResourcePolicy.Validate(gvk); err != nil {
+		return namespaceclassv1alpha1.ResourceRef{}, err
 	}
 
 	mapping, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)

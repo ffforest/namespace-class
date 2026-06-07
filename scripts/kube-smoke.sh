@@ -16,9 +16,11 @@ cleanup_behavior_smoke() {
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-internal" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-deleted" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true clusterrole "$BEHAVIOR_SMOKE_NAME-cluster-reader"
+    kubectl delete --ignore-not-found=true clusterrolebinding "$BEHAVIOR_SMOKE_NAME-denied"
     kubectl delete --ignore-not-found=true namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-cluster"
+    kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-denied"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-deleted"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-internal"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME"
@@ -288,6 +290,46 @@ YAML
     fi
     sleep 1
   done
+
+  echo "Checking controller denies high-risk GVKs by default"
+  kubectl apply -f - <<YAML
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: $BEHAVIOR_SMOKE_NAME-denied
+spec:
+  resources:
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: $BEHAVIOR_SMOKE_NAME-denied
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - kind: ServiceAccount
+          name: default
+          namespace: $BEHAVIOR_SMOKE_NAME
+YAML
+  kubectl label namespace "$BEHAVIOR_SMOKE_NAME" namespaceclass.akuity.io/name="$BEHAVIOR_SMOKE_NAME-denied" --overwrite
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    ready_condition="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{"/"}{.reason}{end}' 2>/dev/null || true)"
+    if [[ "$ready_condition" == "False/GVKDenied" ]]; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected binding Ready=False/GVKDenied, got: $ready_condition" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  if kubectl get clusterrolebinding "$BEHAVIOR_SMOKE_NAME-denied" >/dev/null 2>&1; then
+    echo "expected denied ClusterRoleBinding $BEHAVIOR_SMOKE_NAME-denied not to be created" >&2
+    exit 1
+  fi
 
   echo "Checking controller cleans up cluster-scoped resources during namespace deletion"
   kubectl apply -f - <<YAML

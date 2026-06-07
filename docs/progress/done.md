@@ -34,3 +34,5 @@
 - Upgraded envtest and smoke to verify `NamespaceClass` deletion cleanup.
 - Added namespace finalizer support for cluster-scoped managed resources: resolved classes add `namespaceclass.akuity.io/finalizer`, namespace deletion cleans cluster-scoped inventory, deletes the binding, and removes the finalizer.
 - Upgraded envtest and smoke to verify a cluster-scoped `ClusterRole` is recorded with empty namespace and deleted during namespace deletion.
+- Added runtime GVK policy guard with allow-all default plus `ClusterRoleBinding` denylist, configurable allow/deny GVK flags, Helm values, and `Ready=False` / `GVKDenied` binding status.
+- Upgraded unit tests, envtest, and smoke to verify the default policy denies `ClusterRoleBinding` and prevents controller-mediated privilege escalation.

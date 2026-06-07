@@ -22,6 +22,7 @@
 - Removing a namespace class label makes the desired set empty for that namespace; cleanup is driven by binding inventory.
 - Deleting a `NamespaceClass` makes the desired set empty for namespaces that still reference it; default behavior is cleanup based on binding inventory.
 - The controller adds namespace finalizer `namespaceclass.akuity.io/finalizer` before creating managed resources for a resolved class. During namespace deletion it uses binding inventory to delete cluster-scoped managed resources, deletes the binding, then removes the finalizer. Namespaced managed resources are left to Kubernetes namespace garbage collection during namespace deletion.
+- Runtime GVK policy defaults to allow-all plus denylist, with `rbac.authorization.k8s.io/v1/ClusterRoleBinding` denied by default. Denylist wins over allowlist; when allowlist is non-empty, unmanaged GVKs outside the allowlist are denied. Admission webhook enforcement is planned but not installed yet.
 - Template support is intentionally small: string substitution only, with no loops, conditionals, functions, external lookups, or cross-resource references.
 - Safety risks from arbitrary resources are handled with RBAC boundaries, ownership markers, GVK policy, explicit status, and planned admission validation.
 - First implementation does not dynamically watch every managed GVK. Drift is repaired through primary-object watches and periodic resync.
@@ -32,8 +33,7 @@
 
 ## Open Questions
 
-- Exact GVK allowlist/denylist defaults.
-- Whether to add a validating admission webhook in the first implementation slice or after the basic controller loop.
+- Admission webhook deployment, TLS certificate generation/rotation, and caBundle injection.
 - Final production image name and registry.
 - Whether and when to introduce controller-gen for CRD, RBAC, and generated deepcopy code.
 

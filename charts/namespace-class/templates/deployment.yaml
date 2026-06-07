@@ -31,6 +31,12 @@ spec:
 {{- range .Values.manager.args }}
             - {{ . | quote }}
 {{- end }}
+{{- if .Values.policy.allowGVKs }}
+            - {{ printf "--policy-allow-gvks=%s" (join "," .Values.policy.allowGVKs) | quote }}
+{{- end }}
+{{- if .Values.policy.denyGVKs }}
+            - {{ printf "--policy-deny-gvks=%s" (join "," .Values.policy.denyGVKs) | quote }}
+{{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

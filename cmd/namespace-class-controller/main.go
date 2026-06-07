@@ -19,6 +19,8 @@ func main() {
 	flag.StringVar(&options.HealthProbeBindAddress, "health-probe-bind-address", options.HealthProbeBindAddress, "address for health and readiness probes")
 	flag.BoolVar(&options.LeaderElection, "leader-elect", options.LeaderElection, "enable leader election")
 	flag.StringVar(&options.LeaderElectionID, "leader-election-id", options.LeaderElectionID, "leader election lease name")
+	flag.StringVar(&options.PolicyAllowGVKs, "policy-allow-gvks", options.PolicyAllowGVKs, "comma-separated allowed managed resource GVKs; empty allows all except denylist")
+	flag.StringVar(&options.PolicyDenyGVKs, "policy-deny-gvks", options.PolicyDenyGVKs, "comma-separated denied managed resource GVKs")
 	flag.Parse()
 
 	if *showVersion {

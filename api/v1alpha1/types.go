@@ -19,6 +19,7 @@ const (
 	ReasonBindingRecorded = "BindingRecorded"
 	ReasonClassNotFound   = "ClassNotFound"
 	ReasonCleanupFailed   = "CleanupFailed"
+	ReasonGVKDenied       = "GVKDenied"
 )
 
 type NamespaceClassSpec struct {
