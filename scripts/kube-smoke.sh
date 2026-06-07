@@ -94,7 +94,7 @@ YAML
     exit 1
   fi
 
-  echo "Checking controller deletes stale managed resources"
+  echo "Checking controller automatically reconciles NamespaceClass updates"
   kubectl apply -f - <<YAML
 apiVersion: namespaceclass.akuity.io/v1alpha1
 kind: NamespaceClass
@@ -107,7 +107,6 @@ spec:
       metadata:
         name: $BEHAVIOR_SMOKE_NAME-app
 YAML
-  kubectl annotate namespace "$BEHAVIOR_SMOKE_NAME" test.namespaceclass.akuity.io/reconcile=updated-class --overwrite
 
   for ((i = 0; i < wait_seconds; i++)); do
     if kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then

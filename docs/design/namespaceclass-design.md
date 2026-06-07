@@ -100,7 +100,7 @@ label key：
 namespaceclass.akuity.io/name
 ```
 
-选择 label 而不是 annotation 的原因是：controller 需要高效列出所有属于某个 class 的 namespace，label 可以天然支持 label selector 和 informer index。
+选择 label 而不是 annotation 的原因是：controller 需要高效判断 namespace 是否绑定了 class，并且后续可以通过 label selector 或 informer index 做批量查询。第一版实际 fan-out 使用 `NamespaceClassBinding.spec.className` 索引，因为 binding 已经记录了 controller 观察到的当前绑定状态和 inventory。
 
 ### 4.3 NamespaceClassBinding
 
@@ -259,15 +259,29 @@ Namespace reconcile 是唯一负责实际 create/update/delete 的路径。
 
 ### 6.3 NamespaceClass 事件处理
 
-当某个 `NamespaceClass` 被创建、更新或删除时：
+当某个 `NamespaceClass` 被创建或 spec 更新时：
 
 ```text
-1. 找出所有 label namespaceclass.akuity.io/name=<class-name> 的 Namespace
-2. 将这些 Namespace enqueue
-3. 由 Namespace Reconciler 完成实际同步
+1. 通过 NamespaceClassBinding.spec.className=<class-name> 索引找出所有 binding
+2. 从 binding.spec.namespaceName 得到目标 Namespace
+3. 将这些 Namespace enqueue
+4. 由 Namespace Reconciler 完成实际同步
 ```
 
-这样可以让 namespace 创建、class 切换、class 更新、class 删除都复用同一套 reconciliation 逻辑。
+这样可以让 namespace 创建、class 切换和 class 更新复用同一套 reconciliation 逻辑。
+
+当前实现阶段先不让 `NamespaceClass` 删除事件触发 fan-out；设计上的默认策略仍是 class 缺失时按空 desired set 清理已管理资源并列为风险项，但主动 delete fan-out、binding 删除时机和 cluster-scoped finalizer 细节需要单独实现。
+
+使用 binding 索引而不是每次扫描所有 namespace 的原因是：
+
+```text
+1. binding 已经是当前绑定状态和 inventory 的 source of truth
+2. class 更新时只需要触达已经被 controller 管理过的 namespace
+3. 大规模 namespace 场景下避免全量 namespace list/filter
+4. namespace label 切换仍然由 Namespace watch 负责创建或更新 binding
+```
+
+如果将来需要处理“NamespaceClass 创建时，namespace 已经带 label 但 binding 尚不存在”的特殊恢复场景，可以再增加 namespace label index fan-out 或周期性全量扫描。
 
 ## 7. Inventory 设计
 
@@ -359,8 +373,8 @@ controller:
 
 ```text
 1. NamespaceClass event handler 收到更新事件
-2. 使用 label selector 找到所有引用该 class 的 Namespace
-3. enqueue 每个 Namespace
+2. 使用 NamespaceClassBinding.spec.className 索引找到所有引用该 class 的 binding
+3. enqueue 每个 binding.spec.namespaceName 对应的 Namespace
 4. Namespace Reconciler 对每个 namespace 重新计算 desired set
 5. 创建新增资源，更新已有资源，删除被移除资源
 ```

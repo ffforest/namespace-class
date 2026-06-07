@@ -15,11 +15,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const fieldManager = "namespace-class-controller"
+const bindingClassNameField = "spec.className"
 
 type NamespaceReconciler struct {
 	client.Client
@@ -28,6 +34,16 @@ type NamespaceReconciler struct {
 }
 
 func SetupNamespaceReconciler(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &namespaceclassv1alpha1.NamespaceClassBinding{}, bindingClassNameField, func(object client.Object) []string {
+		binding, ok := object.(*namespaceclassv1alpha1.NamespaceClassBinding)
+		if !ok || binding.Spec.ClassName == "" {
+			return nil
+		}
+		return []string{binding.Spec.ClassName}
+	}); err != nil {
+		return fmt.Errorf("index namespaceclassbindings by class name: %w", err)
+	}
+
 	skipNameValidation := true
 	reconciler := &NamespaceReconciler{
 		Client:     mgr.GetClient(),
@@ -38,7 +54,57 @@ func SetupNamespaceReconciler(mgr ctrl.Manager) error {
 		Named("namespaceclass-binding").
 		WithOptions(crcontroller.Options{SkipNameValidation: &skipNameValidation}).
 		For(&corev1.Namespace{}).
+		Watches(
+			&namespaceclassv1alpha1.NamespaceClass{},
+			handler.EnqueueRequestsFromMapFunc(reconciler.requestsForNamespaceClass),
+			builder.WithPredicates(namespaceClassUpdateFanoutPredicate()),
+		).
 		Complete(reconciler)
+}
+
+func namespaceClassUpdateFanoutPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return false
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func (r *NamespaceReconciler) requestsForNamespaceClass(ctx context.Context, object client.Object) []reconcile.Request {
+	bindings := &namespaceclassv1alpha1.NamespaceClassBindingList{}
+	if err := r.List(ctx, bindings, client.MatchingFields{bindingClassNameField: object.GetName()}); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "list NamespaceClassBindings for NamespaceClass fan-out", "namespaceClass", object.GetName())
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(bindings.Items))
+	seen := map[string]struct{}{}
+	for _, binding := range bindings.Items {
+		namespaceName := binding.Spec.NamespaceName
+		if namespaceName == "" {
+			namespaceName = binding.Name
+		}
+		if namespaceName == "" {
+			continue
+		}
+		if _, found := seen[namespaceName]; found {
+			continue
+		}
+		seen[namespaceName] = struct{}{}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{Name: namespaceName},
+		})
+	}
+	return requests
 }
 
 func (r *NamespaceReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {

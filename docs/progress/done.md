@@ -24,3 +24,5 @@
 - Upgraded envtest and smoke to verify a managed `ServiceAccount` is created and recorded in binding inventory.
 - Added stale managed resource deletion: resources present in previous binding inventory but absent from the current desired set are deleted only when ownership markers match the namespace UID.
 - Upgraded envtest and smoke to verify a `NamespaceClass` resource update creates the new managed `ServiceAccount`, deletes the stale one, and updates binding inventory.
+- Added `NamespaceClass` create/update watch fan-out using a `NamespaceClassBinding.spec.className` cache index, so class resource updates automatically enqueue bound namespaces.
+- Upgraded envtest and smoke to verify `NamespaceClass` updates are applied without manually modifying the namespace.
