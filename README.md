@@ -67,7 +67,9 @@ make rbac-check        # inspect deployed controller ServiceAccount RBAC
 
 ## Current State
 
-This is an initial repository skeleton with a working verification harness and the design document. The controller implementation is intentionally minimal and will be built in small slices.
+The repository contains a working controller implementation for the core NamespaceClass flows: binding labeled namespaces, applying arbitrary raw resource templates, recording durable inventory, switching classes, handling class updates/deletion, cleaning cluster-scoped resources during namespace deletion, enforcing the runtime GVK policy, and repairing drift through primary-object watches plus periodic requeue.
+
+The local harness supports unit tests, envtest-backed controller integration tests, linting, manifest checks, Helm rendering, minikube deployment, smoke tests, and live RBAC inspection.
 
 ## Project Notes
 

@@ -348,6 +348,8 @@ namespaceclass-controller
 
 当 `NamespaceClass` 被删除时，本设计的默认行为是清理所有仍引用该 class 的 namespace 对应的 managed resources。具体做法是将 desired set 视为空，根据 `NamespaceClassBinding.status.inventory` 删除已管理资源。该行为风险较高，尤其当 class 中包含 cluster-scoped resources 时，管理员误删 class 可能触发大规模删除。保守替代方案是保留资源并把 binding 标记为 `ClassNotFound`，要求管理员显式设置 cleanup policy 后再删除。本设计选择默认删除，但将其列为明确风险项。
 
+该删除路径只适用于 API server 明确返回 `NotFound` 的情况。读取 `NamespaceClass` 时的瞬时 API 错误、权限错误或 cache/discovery 异常不应被解释为 class 不存在；controller 必须直接返回错误并 requeue，不能清理 inventory、删除 binding 或删除 managed resources。
+
 ## 9. Switching Classes
 
 namespace class 从 `public-network` 切换到 `internal-network` 时：

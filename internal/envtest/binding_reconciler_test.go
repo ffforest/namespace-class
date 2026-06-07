@@ -1279,6 +1279,10 @@ func TestTemplatesAreRenderedBeforeApply(t *testing.T) {
 				"name": "{{ .Namespace.Name }}-app",
 				"labels": map[string]interface{}{
 					"class": "{{ .Class.Name }}",
+					"team":  "{{ .Namespace.Labels.team.example.com/name }}",
+				},
+				"annotations": map[string]interface{}{
+					"owner": "{{ .Namespace.Annotations.owner.example.com/name }}",
 				},
 			},
 		},
@@ -1292,6 +1296,10 @@ func TestTemplatesAreRenderedBeforeApply(t *testing.T) {
 	namespace := newUnstructured(namespaceGVK, "", "web-portal")
 	namespace.SetLabels(map[string]string{
 		"namespaceclass.akuity.io/name": "public-network",
+		"team.example.com/name":         "platform",
+	})
+	namespace.SetAnnotations(map[string]string{
+		"owner.example.com/name": "forest",
 	})
 	if err := kubeClient.Create(ctx, namespace); err != nil {
 		t.Fatalf("create namespace: %v", err)
@@ -1300,6 +1308,12 @@ func TestTemplatesAreRenderedBeforeApply(t *testing.T) {
 	serviceAccount := waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "web-portal-app")
 	if got := serviceAccount.GetLabels()["class"]; got != "public-network" {
 		t.Fatalf("expected rendered class label, got %q", got)
+	}
+	if got := serviceAccount.GetLabels()["team"]; got != "platform" {
+		t.Fatalf("expected rendered namespace label, got %q", got)
+	}
+	if got := serviceAccount.GetAnnotations()["owner"]; got != "forest" {
+		t.Fatalf("expected rendered namespace annotation, got %q", got)
 	}
 	binding := waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
 	if !hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "web-portal-app") {

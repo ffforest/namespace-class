@@ -49,3 +49,6 @@
 
 - Closed the harness/design backlog by pinning `setup-envtest`, adding Go module drift checks, adding shell/Ruby script syntax checks, clarifying offline manifest lint naming, and documenting explicit envtest asset prefetching.
 - Added a project-local `golangci-lint` target with an expanded lint configuration.
+- Fixed NamespaceClass read-error handling so only explicit `NotFound` enters missing-class cleanup; transient read failures now return an error without deleting bindings or managed resources.
+- Expanded template variables to include namespace labels and annotations using `.Namespace.Labels.<key>` and `.Namespace.Annotations.<key>`.
+- Refreshed README current-state text to describe the implemented controller and harness instead of the initial skeleton.

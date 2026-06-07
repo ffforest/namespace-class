@@ -246,7 +246,10 @@ func (r *NamespaceReconciler) cleanupBindingForNamespace(ctx context.Context, na
 }
 
 func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *corev1.Namespace, className string) error {
-	namespaceClass, observedClassGeneration, condition := r.classCondition(ctx, className)
+	namespaceClass, observedClassGeneration, condition, err := r.classCondition(ctx, className)
+	if err != nil {
+		return err
+	}
 	if namespaceClass != nil {
 		if err := r.ensureNamespaceFinalizer(ctx, namespace); err != nil {
 			return err
@@ -256,7 +259,7 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 	bindingName := namespace.Name
 	binding := &namespaceclassv1alpha1.NamespaceClassBinding{}
 	key := client.ObjectKey{Name: bindingName}
-	err := r.Get(ctx, key, binding)
+	err = r.Get(ctx, key, binding)
 	switch {
 	case apierrors.IsNotFound(err):
 		binding = &namespaceclassv1alpha1.NamespaceClassBinding{
@@ -584,11 +587,18 @@ func rawToUnstructured(raw runtime.RawExtension) (*unstructured.Unstructured, er
 }
 
 func templateValues(namespace *corev1.Namespace, className string) map[string]string {
-	return map[string]string{
+	values := map[string]string{
 		".Namespace.Name": namespace.Name,
 		".Namespace.UID":  string(namespace.UID),
 		".Class.Name":     className,
 	}
+	for key, value := range namespace.Labels {
+		values[fmt.Sprintf(".Namespace.Labels.%s", key)] = value
+	}
+	for key, value := range namespace.Annotations {
+		values[fmt.Sprintf(".Namespace.Annotations.%s", key)] = value
+	}
+	return values
 }
 
 func renderObjectTemplates(object *unstructured.Unstructured, values map[string]string) error {
@@ -712,7 +722,7 @@ func addManagedMetadata(object *unstructured.Unstructured, namespace *corev1.Nam
 	object.SetAnnotations(annotations)
 }
 
-func (r *NamespaceReconciler) classCondition(ctx context.Context, className string) (*namespaceclassv1alpha1.NamespaceClass, int64, metav1.Condition) {
+func (r *NamespaceReconciler) classCondition(ctx context.Context, className string) (*namespaceclassv1alpha1.NamespaceClass, int64, metav1.Condition, error) {
 	namespaceClass := &namespaceclassv1alpha1.NamespaceClass{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: className}, namespaceClass); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -721,14 +731,9 @@ func (r *NamespaceReconciler) classCondition(ctx context.Context, className stri
 				Status:  metav1.ConditionFalse,
 				Reason:  namespaceclassv1alpha1.ReasonClassNotFound,
 				Message: fmt.Sprintf("NamespaceClass %q was not found", className),
-			}
+			}, nil
 		}
-		return nil, 0, metav1.Condition{
-			Type:    namespaceclassv1alpha1.ConditionReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "ClassReadFailed",
-			Message: err.Error(),
-		}
+		return nil, 0, metav1.Condition{}, fmt.Errorf("read namespaceclass %q: %w", className, err)
 	}
 
 	return namespaceClass, namespaceClass.Generation, metav1.Condition{
@@ -736,5 +741,5 @@ func (r *NamespaceReconciler) classCondition(ctx context.Context, className stri
 		Status:  metav1.ConditionTrue,
 		Reason:  namespaceclassv1alpha1.ReasonBindingRecorded,
 		Message: "NamespaceClass binding recorded",
-	}
+	}, nil
 }
