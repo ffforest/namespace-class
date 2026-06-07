@@ -420,6 +420,125 @@ func TestNamespaceClassUpdatesReconcileBoundNamespaces(t *testing.T) {
 	}
 }
 
+func TestNamespaceClassLabelSwitchCreatesNewResourcesAndDeletesOldResources(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join(repoRoot(t), "config", "crd", "bases")},
+	}
+
+	restConfig, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("start envtest: %v", err)
+	}
+	defer func() {
+		if err := testEnv.Stop(); err != nil {
+			t.Fatalf("stop envtest: %v", err)
+		}
+	}()
+
+	mgr, err := ncmanager.New(restConfig, ncmanager.Options{
+		MetricsBindAddress:     "0",
+		HealthProbeBindAddress: freeLocalAddress(t),
+		LeaderElection:         false,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	managerCtx, stopManager := context.WithCancel(ctx)
+	defer stopManager()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mgr.Start(managerCtx)
+	}()
+	defer func() {
+		stopManager()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("manager returned error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("manager did not stop")
+		}
+	}()
+
+	kubeClient, err := client.New(restConfig, client.Options{})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	publicClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(publicClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "public-app",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set public resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, publicClass); err != nil {
+		t.Fatalf("create public namespaceclass: %v", err)
+	}
+
+	internalClass := newUnstructured(namespaceClassGVK, "", "internal-network")
+	if err := unstructured.SetNestedSlice(internalClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "internal-app",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set internal resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, internalClass); err != nil {
+		t.Fatalf("create internal namespaceclass: %v", err)
+	}
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	binding := waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+	if !hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "public-app") {
+		t.Fatalf("expected public ServiceAccount inventory entry, got %#v", binding.Object["status"])
+	}
+
+	namespace = newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, namespace); err != nil {
+		t.Fatalf("get namespace for class switch: %v", err)
+	}
+	labels := namespace.GetLabels()
+	labels["namespaceclass.akuity.io/name"] = "internal-network"
+	namespace.SetLabels(labels)
+	if err := kubeClient.Update(ctx, namespace); err != nil {
+		t.Fatalf("switch namespace class: %v", err)
+	}
+
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "internal-app")
+	waitForObjectDeleted(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+
+	binding = waitForBindingClass(t, ctx, kubeClient, "web-portal", "internal-network")
+	if !hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "internal-app") {
+		t.Fatalf("expected internal ServiceAccount inventory entry, got %#v", binding.Object["status"])
+	}
+	if hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "public-app") {
+		t.Fatalf("expected public ServiceAccount inventory entry to be removed, got %#v", binding.Object["status"])
+	}
+}
+
 func waitForBinding(t *testing.T, ctx context.Context, kubeClient client.Client, name string) *unstructured.Unstructured {
 	t.Helper()
 
@@ -436,6 +555,28 @@ func waitForBinding(t *testing.T, ctx context.Context, kubeClient client.Client,
 	}
 
 	t.Fatalf("binding %q was not created: %v", name, lastErr)
+	return nil
+}
+
+func waitForBindingClass(t *testing.T, ctx context.Context, kubeClient client.Client, name, className string) *unstructured.Unstructured {
+	t.Helper()
+
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		binding := newUnstructured(namespaceClassBindingGVK, "", name)
+		err := kubeClient.Get(ctx, client.ObjectKey{Name: name}, binding)
+		if err == nil &&
+			nestedString(t, binding, "spec", "className") == className &&
+			nestedString(t, binding, "status", "observedNamespaceUID") != "" &&
+			hasCondition(t, binding, "Ready", "True", "BindingRecorded") {
+			return binding
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("binding %q did not observe class %q: %v", name, className, lastErr)
 	return nil
 }
 

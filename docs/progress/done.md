@@ -26,3 +26,5 @@
 - Upgraded envtest and smoke to verify a `NamespaceClass` resource update creates the new managed `ServiceAccount`, deletes the stale one, and updates binding inventory.
 - Added `NamespaceClass` create/update watch fan-out using a `NamespaceClassBinding.spec.className` cache index, so class resource updates automatically enqueue bound namespaces.
 - Upgraded envtest and smoke to verify `NamespaceClass` updates are applied without manually modifying the namespace.
+- Added envtest coverage for namespace class switching: changing the namespace label from class A to class B creates the new class resource, deletes the old class resource, and updates binding inventory.
+- Upgraded smoke to verify class switching end-to-end in minikube.
