@@ -10,7 +10,6 @@
 ### High
 
 - [ ] Decide and document namespace finalizer behavior for cluster-scoped managed resources. Recommended decision: when cluster-scoped resources are supported, the controller must add a namespace finalizer so cluster-scoped cleanup can complete before namespace deletion finishes.
-- [ ] Clarify `NamespaceClass` missing/deleted binding lifecycle. Recommended decision: cleanup succeeds -> delete binding; cleanup fails -> keep binding with a condition such as `ClassNotFound` or `CleanupFailed`.
 
 ### Medium
 

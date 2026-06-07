@@ -16,7 +16,7 @@
 - `NamespaceClassBinding.status.inventory` is the source of truth for managed resource cleanup.
 - Managed resource identity is `apiVersion + kind + namespace + name`; name alone is never enough.
 - Namespace reconciliation is the only path that mutates managed resources. `NamespaceClass` events enqueue affected namespaces instead of applying resources directly.
-- `NamespaceClass` update fan-out uses the controller cache index on `NamespaceClassBinding.spec.className`, then enqueues each bound namespace from `binding.spec.namespaceName`.
+- `NamespaceClass` create/update/delete fan-out uses the controller cache index on `NamespaceClassBinding.spec.className`, then enqueues each bound namespace from `binding.spec.namespaceName`.
 - Managed resources are created and updated with server-side apply using a fixed field manager.
 - Existing resources without controller ownership markers are not adopted or overwritten.
 - Removing a namespace class label makes the desired set empty for that namespace; cleanup is driven by binding inventory.
@@ -24,7 +24,7 @@
 - Template support is intentionally small: string substitution only, with no loops, conditionals, functions, external lookups, or cross-resource references.
 - Safety risks from arbitrary resources are handled with RBAC boundaries, ownership markers, GVK policy, explicit status, and planned admission validation.
 - First implementation does not dynamically watch every managed GVK. Drift is repaired through primary-object watches and periodic resync.
-- `NamespaceClass` delete cleanup is a design goal with default cleanup semantics, but active delete-event fan-out and final binding lifecycle are not implemented yet.
+- `NamespaceClass` missing/deleted cleanup treats the desired set as empty; cleanup success deletes the binding, while cleanup failure keeps the binding with a `CleanupFailed` condition for retry.
 - The repository has a working envtest harness. `make envtest` starts a real API server and etcd, installs project CRDs, and validates CRD/status behavior.
 - `make check` is the aggregate local verification entry point and includes unit tests, envtest, vet, manifest checks, and Helm rendering.
 - Current CRD manifests are handwritten YAML. Go API types and controller-gen are not wired in yet.

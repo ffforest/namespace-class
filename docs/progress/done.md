@@ -30,3 +30,5 @@
 - Upgraded smoke to verify class switching end-to-end in minikube.
 - Added cleanup for namespace class label removal: managed resources from binding inventory are deleted and the `NamespaceClassBinding` is removed after cleanup succeeds.
 - Upgraded envtest and smoke to verify label removal cleanup.
+- Added `NamespaceClass` deletion cleanup: delete events fan out through bindings, missing classes are treated as an empty desired set, cleanup success deletes the binding, and cleanup failure records `CleanupFailed`.
+- Upgraded envtest and smoke to verify `NamespaceClass` deletion cleanup.

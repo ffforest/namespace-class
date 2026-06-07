@@ -71,7 +71,7 @@ func namespaceClassUpdateFanoutPredicate() predicate.Funcs {
 			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
 		},
 		DeleteFunc: func(event.DeleteEvent) bool {
-			return false
+			return true
 		},
 		GenericFunc: func(event.GenericEvent) bool {
 			return false
@@ -193,17 +193,32 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 		}
 	}
 
-	inventory := []namespaceclassv1alpha1.ResourceRef{}
 	previousInventory := append([]namespaceclassv1alpha1.ResourceRef(nil), binding.Status.Inventory...)
-	if namespaceClass != nil {
-		refs, err := r.applyManagedResources(ctx, namespace, namespaceClass)
-		if err != nil {
-			return err
+	if namespaceClass == nil {
+		if err := r.deleteStaleManagedResources(ctx, namespace, previousInventory, nil); err != nil {
+			binding.Status.ObservedNamespaceUID = string(namespace.UID)
+			binding.Status.ObservedClassGeneration = observedClassGeneration
+			condition.Reason = namespaceclassv1alpha1.ReasonCleanupFailed
+			condition.Message = fmt.Sprintf("NamespaceClass %q was not found and cleanup failed: %v", className, err)
+			condition.ObservedGeneration = binding.Generation
+			meta.SetStatusCondition(&binding.Status.Conditions, condition)
+			if statusErr := r.Status().Update(ctx, binding); statusErr != nil {
+				return fmt.Errorf("cleanup missing namespaceclass: %w; update cleanup status: %w", err, statusErr)
+			}
+			return fmt.Errorf("cleanup missing namespaceclass: %w", err)
 		}
-		if err := r.deleteStaleManagedResources(ctx, namespace, previousInventory, refs); err != nil {
-			return err
+		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete namespaceclassbinding after missing class cleanup: %w", err)
 		}
-		inventory = refs
+		return nil
+	}
+
+	inventory, err := r.applyManagedResources(ctx, namespace, namespaceClass)
+	if err != nil {
+		return err
+	}
+	if err := r.deleteStaleManagedResources(ctx, namespace, previousInventory, inventory); err != nil {
+		return err
 	}
 
 	binding.Status.ObservedNamespaceUID = string(namespace.UID)

@@ -14,8 +14,10 @@ cleanup_behavior_smoke() {
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-old" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-internal" --namespace "$BEHAVIOR_SMOKE_NAME"
+    kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-deleted" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
+    kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-deleted"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME-internal"
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME"
   fi
@@ -216,6 +218,70 @@ YAML
     fi
     if ((i == wait_seconds - 1)); then
       echo "expected NamespaceClassBinding $BEHAVIOR_SMOKE_NAME to be deleted after label removal" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  echo "Checking controller cleans up after NamespaceClass deletion"
+  kubectl apply -f - <<YAML
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: $BEHAVIOR_SMOKE_NAME-deleted
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: $BEHAVIOR_SMOKE_NAME-deleted
+YAML
+  kubectl label namespace "$BEHAVIOR_SMOKE_NAME" namespaceclass.akuity.io/name="$BEHAVIOR_SMOKE_NAME-deleted" --overwrite
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-deleted" --namespace "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected ServiceAccount $BEHAVIOR_SMOKE_NAME-deleted to be created before class deletion" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    class_name=""
+    if class_name="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.spec.className}' 2>/dev/null)"; then
+      if [[ "$class_name" == "$BEHAVIOR_SMOKE_NAME-deleted" ]]; then
+        break
+      fi
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected binding to observe $BEHAVIOR_SMOKE_NAME-deleted before class deletion, got class=$class_name" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  kubectl delete namespaceclass "$BEHAVIOR_SMOKE_NAME-deleted"
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-deleted" --namespace "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected ServiceAccount $BEHAVIOR_SMOKE_NAME-deleted to be deleted after class deletion" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected NamespaceClassBinding $BEHAVIOR_SMOKE_NAME to be deleted after class deletion" >&2
       exit 1
     fi
     sleep 1

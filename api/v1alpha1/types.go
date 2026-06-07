@@ -16,6 +16,7 @@ const (
 	ConditionReady        = "Ready"
 	ReasonBindingRecorded = "BindingRecorded"
 	ReasonClassNotFound   = "ClassNotFound"
+	ReasonCleanupFailed   = "CleanupFailed"
 )
 
 type NamespaceClassSpec struct {

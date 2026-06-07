@@ -255,11 +255,11 @@ Namespace reconcile 是唯一负责实际 create/update/delete 的路径。
    5.6 写回 NamespaceClassBinding.status.inventory 和 conditions
 ```
 
-如果 namespace 仍然存在但 `NamespaceClass` 不存在，controller 将 desired set 视为空，根据 binding 中的 inventory 清理已管理资源，并将 binding 标记为 `ClassNotFound` 或在清理完成后删除。
+如果 namespace 仍然存在但 `NamespaceClass` 不存在，controller 将 desired set 视为空，根据 binding 中的 inventory 清理已管理资源。清理成功后删除 `NamespaceClassBinding`；清理失败时保留 binding，并写入 `Ready=False` / `CleanupFailed` condition 以便重试和排查。
 
 ### 6.3 NamespaceClass 事件处理
 
-当某个 `NamespaceClass` 被创建或 spec 更新时：
+当某个 `NamespaceClass` 被创建、spec 更新或删除时：
 
 ```text
 1. 通过 NamespaceClassBinding.spec.className=<class-name> 索引找出所有 binding
@@ -268,9 +268,7 @@ Namespace reconcile 是唯一负责实际 create/update/delete 的路径。
 4. 由 Namespace Reconciler 完成实际同步
 ```
 
-这样可以让 namespace 创建、class 切换和 class 更新复用同一套 reconciliation 逻辑。
-
-当前实现阶段先不让 `NamespaceClass` 删除事件触发 fan-out；设计上的默认策略仍是 class 缺失时按空 desired set 清理已管理资源并列为风险项，但主动 delete fan-out、binding 删除时机和 cluster-scoped finalizer 细节需要单独实现。
+这样可以让 namespace 创建、class 切换、class 更新和 class 删除复用同一套 reconciliation 逻辑。class 删除事件触发 fan-out 后，Namespace Reconciler 会发现 class 不存在，并按空 desired set 清理 binding inventory 中的资源。
 
 使用 binding 索引而不是每次扫描所有 namespace 的原因是：
 
