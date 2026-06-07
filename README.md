@@ -37,12 +37,19 @@ make smoke
 ```bash
 make help              # list commands
 make tools             # install project-local kubectl and helm
+make envtest-tools     # prefetch project-local envtest apiserver/etcd binaries
+make lint-tools        # install project-local golangci-lint
 make doctor            # check local prerequisites
+make mod-tidy          # tidy Go module files
+make mod-check         # verify Go module files are tidy
 make fmt               # check Go formatting
+make lint              # run golangci-lint
 make test              # run Go unit tests
 make envtest           # run envtest-backed integration tests
 make vet               # run go vet
-make manifests-check   # validate CRD manifests client-side
+make scripts-check     # check shell and Ruby script syntax
+make manifests-lint    # validate CRD manifests with offline YAML/shape checks
+make manifests-check   # backwards-compatible alias for manifests-lint
 make helm-template     # render Helm chart
 make check             # local aggregate verification
 make cluster-check     # verify kubectl can reach minikube/current cluster
@@ -55,6 +62,8 @@ make rbac-check        # inspect deployed controller ServiceAccount RBAC
 ```
 
 `make deploy-local` uses a unique local image tag derived from `IMAGE_TAG` and the current timestamp so minikube does not reuse an older same-tag image.
+
+`make envtest` runs `make envtest-tools` automatically. Run `make envtest-tools` directly when you want to prefetch or refresh the envtest assets before the full verification path.
 
 ## Current State
 

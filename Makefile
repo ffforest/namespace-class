@@ -8,10 +8,13 @@ PATH := $(LOCAL_BIN):$(PATH)
 LOCAL_KUBECTL := $(LOCAL_BIN)/kubectl
 LOCAL_HELM := $(LOCAL_BIN)/helm
 SETUP_ENVTEST := $(LOCAL_BIN)/setup-envtest
+GOLANGCI_LINT := $(LOCAL_BIN)/golangci-lint
 ENVTEST_ASSETS_FILE := $(ROOT_DIR)/.tools/envtest-assets-path
 
 GO ?= go
 RUBY ?= ruby
+GOCACHE ?= $(ROOT_DIR)/.tools/go-build-cache
+GOLANGCI_LINT_CACHE ?= $(ROOT_DIR)/.tools/golangci-lint-cache
 KUBECTL ?= $(if $(wildcard $(LOCAL_KUBECTL)),$(LOCAL_KUBECTL),kubectl)
 HELM ?= $(if $(wildcard $(LOCAL_HELM)),$(LOCAL_HELM),helm)
 MINIKUBE ?= minikube
@@ -29,12 +32,16 @@ RELEASE_NAME ?= namespace-class
 RELEASE_NAMESPACE ?= namespace-class-system
 RBAC_SERVICE_ACCOUNT ?= namespace-class-controller
 RBAC_SAMPLE_NAMESPACE ?= default
+SETUP_ENVTEST_VERSION ?= v0.24.1
 ENVTEST_K8S_VERSION ?= 1.35.0
 ENVTEST_ASSETS_DIR ?= $(ROOT_DIR)/.tools/envtest
+GOLANGCI_LINT_VERSION ?= v2.12.2
 CRD_WAIT_TIMEOUT ?= 60s
 CONTROLLER_WAIT_TIMEOUT ?= 120s
 
-.PHONY: help tools envtest-tools doctor build container-binary image-build image-load test envtest vet fmt fmt-fix docs-check manifests-check helm-template check \
+export GOCACHE GOLANGCI_LINT_CACHE
+
+.PHONY: help tools envtest-tools lint-tools doctor build container-binary image-build image-load mod-tidy mod-check test envtest vet lint fmt fmt-fix docs-check scripts-check manifests-lint manifests-check helm-template check \
 	cluster-check deploy-crds wait-crds undeploy-crds deploy restart-controller wait-controller deploy-local deploy-local-with-image undeploy-local smoke rbac-check clean
 
 help: ## Show available commands
@@ -45,12 +52,18 @@ tools: ## Install project-local kubectl and helm into .tools/bin
 
 $(SETUP_ENVTEST):
 	@mkdir -p $(LOCAL_BIN)
-	GOBIN=$(LOCAL_BIN) $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	GOBIN=$(LOCAL_BIN) $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
+
+$(GOLANGCI_LINT):
+	@mkdir -p $(LOCAL_BIN)
+	GOBIN=$(LOCAL_BIN) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 envtest-tools: $(SETUP_ENVTEST) ## Install project-local envtest apiserver/etcd binaries
 	@mkdir -p $(ENVTEST_ASSETS_DIR)
 	$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path > $(ENVTEST_ASSETS_FILE)
 	@echo "KUBEBUILDER_ASSETS=$$(cat $(ENVTEST_ASSETS_FILE))"
+
+lint-tools: $(GOLANGCI_LINT) ## Install project-local golangci-lint
 
 doctor: ## Check local prerequisites
 	bash scripts/doctor.sh
@@ -69,6 +82,18 @@ image-build: container-binary ## Build local controller container image
 image-load: image-build ## Load local controller image into minikube
 	$(MINIKUBE) image load --overwrite=true --daemon=true $(IMAGE)
 
+mod-tidy: ## Tidy Go module files
+	$(GO) mod tidy
+
+mod-check: ## Verify Go module files are tidy
+	@set -e; \
+	tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp go.mod go.sum "$$tmp"/; \
+	$(GO) mod tidy; \
+	diff -u "$$tmp/go.mod" go.mod; \
+	diff -u "$$tmp/go.sum" go.sum
+
 test: ## Run unit tests
 	$(GO) test ./...
 
@@ -77,6 +102,9 @@ envtest: envtest-tools ## Run envtest-backed integration tests
 
 vet: ## Run go vet
 	$(GO) vet ./...
+
+lint: lint-tools ## Run golangci-lint
+	$(GOLANGCI_LINT) run ./...
 
 fmt: ## Check Go formatting
 	@test -z "$$(gofmt -l $$(find . -path './.tools' -prune -o -path './bin' -prune -o -name '*.go' -print))" || { \
@@ -91,8 +119,14 @@ fmt-fix: ## Format Go files
 docs-check: ## Check docs for trailing whitespace
 	@! grep -RIn '[[:blank:]]$$' AGENTS.md README.md CONTEXT.md docs || { echo "Trailing whitespace found"; exit 1; }
 
-manifests-check: ## Validate CRD manifests client-side
+scripts-check: ## Check shell and Ruby script syntax
+	@for script in scripts/*.sh; do bash -n "$$script"; done
+	@for script in scripts/*.rb; do $(RUBY) -c "$$script" >/dev/null; done
+
+manifests-lint: ## Validate CRD manifests with offline YAML and shape checks
 	$(RUBY) scripts/check-manifests.rb config/crd/bases config/samples
+
+manifests-check: manifests-lint ## Backwards-compatible alias for offline manifest lint
 
 helm-template: ## Render Helm chart
 	$(HELM) template $(RELEASE_NAME) charts/namespace-class \
@@ -101,7 +135,7 @@ helm-template: ## Render Helm chart
 		--set image.tag=$(IMAGE_TAG) \
 		--set image.pullPolicy=$(IMAGE_PULL_POLICY) >/tmp/namespace-class-helm-rendered.yaml
 
-check: docs-check fmt test envtest vet manifests-check helm-template ## Run local aggregate verification
+check: docs-check fmt mod-check lint test envtest vet scripts-check manifests-lint helm-template ## Run local aggregate verification
 
 cluster-check: ## Verify kubectl/minikube cluster access
 	$(MINIKUBE) status

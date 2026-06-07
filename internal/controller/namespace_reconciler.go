@@ -257,7 +257,8 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 	binding := &namespaceclassv1alpha1.NamespaceClassBinding{}
 	key := client.ObjectKey{Name: bindingName}
 	err := r.Get(ctx, key, binding)
-	if apierrors.IsNotFound(err) {
+	switch {
+	case apierrors.IsNotFound(err):
 		binding = &namespaceclassv1alpha1.NamespaceClassBinding{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: namespaceclassv1alpha1.GroupVersion.String(),
@@ -277,9 +278,9 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 		if err := r.Get(ctx, key, binding); err != nil {
 			return fmt.Errorf("get created namespaceclassbinding: %w", err)
 		}
-	} else if err != nil {
+	case err != nil:
 		return fmt.Errorf("get namespaceclassbinding: %w", err)
-	} else if binding.Spec.NamespaceName != namespace.Name || binding.Spec.ClassName != className {
+	case binding.Spec.NamespaceName != namespace.Name || binding.Spec.ClassName != className:
 		binding.Spec.NamespaceName = namespace.Name
 		binding.Spec.ClassName = className
 		if err := r.Update(ctx, binding); err != nil {
@@ -444,7 +445,8 @@ func (r *NamespaceReconciler) applyManagedResources(ctx context.Context, namespa
 
 	refs := make([]namespaceclassv1alpha1.ResourceRef, 0, len(resources))
 	for _, resource := range resources {
-		if err := r.Patch(ctx, resource.object, client.Apply, client.FieldOwner(fieldManager)); err != nil {
+		applyConfig := client.ApplyConfigurationFromUnstructured(resource.object)
+		if err := r.Apply(ctx, applyConfig, client.FieldOwner(fieldManager)); err != nil {
 			reason := namespaceclassv1alpha1.ReasonApplyFailed
 			if apierrors.IsConflict(err) {
 				reason = namespaceclassv1alpha1.ReasonApplyConflict

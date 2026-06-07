@@ -13,11 +13,8 @@ No open high-priority harness/design items.
 
 ### Medium
 
-- [ ] Pin the `setup-envtest` install version in `Makefile` instead of using `@latest`, so envtest behavior remains reproducible.
-- [ ] Add dependency drift targets such as `make mod-tidy` and `make mod-check`, and include the check in the aggregate verification path.
-- [ ] Add `make scripts-check` for shell and Ruby syntax checks, then include it in `make check`.
+No open medium-priority harness/design items.
 
 ### Low
 
-- [ ] Rename or clarify `manifests-check`; it is currently an offline YAML/shape lint, while server-side Kubernetes validation is covered by smoke.
-- [ ] Document `make envtest-tools` in `README.md` so users can explicitly prefetch envtest assets before running `make envtest`.
+No open low-priority harness/design items.

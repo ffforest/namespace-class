@@ -44,3 +44,8 @@
 - Added first-slice drift repair through `NamespaceClassBinding` delete/update watch plus periodic namespace requeue, without dynamic informers for managed resources.
 - Upgraded envtest coverage for unmanaged conflicts, SSA conflicts, partial apply, unknown GVK, duplicate desired identities, damaged inventory, template rendering, binding deletion drift, and periodic managed-resource repair.
 - Upgraded smoke to verify the controller recreates a deleted `NamespaceClassBinding` for a still-labeled namespace.
+
+## 2026-06-08
+
+- Closed the harness/design backlog by pinning `setup-envtest`, adding Go module drift checks, adding shell/Ruby script syntax checks, clarifying offline manifest lint naming, and documenting explicit envtest asset prefetching.
+- Added a project-local `golangci-lint` target with an expanded lint configuration.
