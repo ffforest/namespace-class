@@ -87,8 +87,15 @@ func TestReconcileDoesNotCleanupInventoryWhenNamespaceClassReadFails(t *testing.
 		t.Errorf("expected error to include class read failure %q, got %q", classReadErr.Error(), err.Error())
 	}
 
-	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, &namespaceclassv1alpha1.NamespaceClassBinding{}); err != nil {
+	gotBinding := &namespaceclassv1alpha1.NamespaceClassBinding{}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, gotBinding); err != nil {
 		t.Errorf("expected binding to remain after class read failure: %v", err)
+	}
+	if len(gotBinding.Status.Inventory) != 1 {
+		t.Fatalf("expected binding inventory to remain unchanged, got %#v", gotBinding.Status.Inventory)
+	}
+	if gotBinding.Status.Inventory[0] != binding.Status.Inventory[0] {
+		t.Fatalf("expected binding inventory to remain unchanged, got %#v", gotBinding.Status.Inventory[0])
 	}
 	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: "web-portal", Name: "old-app"}, &corev1.ServiceAccount{}); err != nil {
 		t.Errorf("expected managed resource to remain after class read failure: %v", err)
