@@ -12,3 +12,6 @@
 - Verified cluster smoke path with `make smoke`.
 - Added envtest harness with local `setup-envtest` assets, an `envtest` build-tagged CRD/status integration test, and `make envtest`.
 - Updated `make check` to include envtest-backed integration coverage.
+- Added a no-op controller-runtime manager entrypoint with health and readiness probes.
+- Added a local image and deployment loop: `Dockerfile`, `make image-build`, `make image-load`, `make deploy-local`, `make wait-crds`, `make wait-controller`, and `make undeploy-local`.
+- Upgraded cluster smoke checks to wait for CRD establishment and verify controller Deployment availability when the controller is installed.

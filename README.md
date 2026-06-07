@@ -47,6 +47,9 @@ make helm-template     # render Helm chart
 make check             # local aggregate verification
 make cluster-check     # verify kubectl can reach minikube/current cluster
 make deploy-crds       # install CRDs into the current cluster
+make image-build       # build namespace-class-controller:dev locally
+make image-load        # load namespace-class-controller:dev into minikube
+make deploy-local      # build, load, install, wait, and smoke-test locally
 make smoke             # run cluster smoke checks
 ```
 

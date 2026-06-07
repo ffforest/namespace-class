@@ -23,10 +23,21 @@ spec:
         - name: manager
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: healthz
+              containerPort: 8081
+              protocol: TCP
           args:
 {{- range .Values.manager.args }}
             - {{ . | quote }}
 {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
           resources:
 {{ toYaml .Values.manager.resources | indent 12 }}
-

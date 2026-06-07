@@ -11,16 +11,8 @@
 
 ## Harness / Design Review Backlog
 
-### Recommended deployment-loop sequence
-
-1. [ ] Implement a controller manager entrypoint that starts cleanly and does not exit immediately, even before full reconciliation behavior is complete.
-2. [ ] Add `Dockerfile`, `make image-build`, `make image-load`, and `make deploy-local` so the controller can run as a Deployment in minikube.
-3. [ ] Add `make wait-crds` and `make wait-controller` to make CRD/controller readiness explicit.
-4. [ ] Upgrade `make smoke` or add `make smoke-e2e` for behavior-level cluster verification after the controller is deployable.
-
 ### High
 
-- [ ] Add a local controller deployment loop: `make image-build`, `make image-load`, `make deploy-local`, and `make undeploy-local`, so controller changes can be built, loaded into minikube, deployed, and removed without ad hoc commands.
 - [ ] Upgrade `make smoke` from CRD/sample dry-run to behavior-level e2e smoke: create `NamespaceClass`, create a labeled `Namespace`, wait for `NamespaceClassBinding`, verify managed resources, switch class, verify old resources are removed and new resources are created, then clean up.
 - [ ] Decide and document namespace finalizer behavior for cluster-scoped managed resources. Recommended decision: when cluster-scoped resources are supported, the controller must add a namespace finalizer so cluster-scoped cleanup can complete before namespace deletion finishes.
 - [ ] Clarify `NamespaceClass` missing/deleted binding lifecycle. Recommended decision: cleanup succeeds -> delete binding; cleanup fails -> keep binding with a condition such as `ClassNotFound` or `CleanupFailed`.

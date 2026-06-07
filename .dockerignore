@@ -1,0 +1,7 @@
+.git
+.tools
+.runtime
+coverage
+reports
+bin/*
+!bin/linux-*/namespace-class-controller

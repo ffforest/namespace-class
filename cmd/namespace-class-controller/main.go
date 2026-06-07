@@ -4,12 +4,21 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	ncmanager "github.com/forest/namespace-class/internal/manager"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 var version = "dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
+	options := ncmanager.DefaultOptions()
+	flag.StringVar(&options.MetricsBindAddress, "metrics-bind-address", options.MetricsBindAddress, "address for metrics endpoint; use 0 to disable")
+	flag.StringVar(&options.HealthProbeBindAddress, "health-probe-bind-address", options.HealthProbeBindAddress, "address for health and readiness probes")
+	flag.BoolVar(&options.LeaderElection, "leader-elect", options.LeaderElection, "enable leader election")
+	flag.StringVar(&options.LeaderElectionID, "leader-election-id", options.LeaderElectionID, "leader election lease name")
 	flag.Parse()
 
 	if *showVersion {
@@ -17,6 +26,16 @@ func main() {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "namespace-class-controller skeleton: controller loop not implemented yet")
-	os.Exit(2)
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
+	mgr, err := ncmanager.New(ctrl.GetConfigOrDie(), options)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create manager: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		fmt.Fprintf(os.Stderr, "run manager: %v\n", err)
+		os.Exit(1)
+	}
 }
