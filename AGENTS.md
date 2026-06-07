@@ -13,7 +13,8 @@
 
 - 新增功能前，先判断是否影响 `docs/design/namespaceclass-design.md` 中的 API、controller reconciliation、inventory、RBAC 或测试 harness；影响这些边界时先更新设计或写 ADR。
 - 较大改动进入实现前，先在 `docs/plans/{日期}-{主题}.md` 写实施计划，明确验收命令。
-- 代码改动遵循小步验证：先补测试或 smoke，再实现，再运行最小充分 `make` 目标。
+- 代码改动默认遵循 TDD：先写能失败的测试或集群 smoke，再实现最小代码让它通过，最后重构并运行最小充分 `make` 目标。
+- 纯文档、注释或机械格式改动不需要强行补测试；涉及 controller 行为、CRD/schema、status、inventory、RBAC、模板渲染或 Helm manifest 时，必须先有对应单元测试、envtest 或 smoke 验证。
 - 不要绕过 Makefile 约定写临时验证脚本；确实需要新增脚本时放入 `scripts/` 并接入 Makefile。
 - 不要把本地 minikube 状态、kubeconfig、下载的工具、构建产物或日志提交进仓库。
 
