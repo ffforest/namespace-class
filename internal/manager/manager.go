@@ -3,6 +3,8 @@ package manager
 import (
 	"fmt"
 
+	namespaceclassv1alpha1 "github.com/forest/namespace-class/api/v1alpha1"
+	nccontroller "github.com/forest/namespace-class/internal/controller"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -40,6 +42,9 @@ func New(restConfig *rest.Config, options Options) (ctrl.Manager, error) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("add client-go scheme: %w", err)
 	}
+	if err := namespaceclassv1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("add namespaceclass scheme: %w", err)
+	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
@@ -59,6 +64,9 @@ func New(restConfig *rest.Config, options Options) (ctrl.Manager, error) {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return nil, fmt.Errorf("add readyz check: %w", err)
+	}
+	if err := nccontroller.SetupNamespaceReconciler(mgr); err != nil {
+		return nil, fmt.Errorf("setup namespace reconciler: %w", err)
 	}
 
 	return mgr, nil

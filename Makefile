@@ -19,6 +19,8 @@ BIN_DIR ?= $(ROOT_DIR)/bin
 CONTROLLER_BIN := $(BIN_DIR)/namespace-class-controller
 IMAGE_REPOSITORY ?= namespace-class-controller
 IMAGE_TAG ?= dev
+LOCAL_IMAGE_TAG ?= $(IMAGE_TAG)-$(shell date +%Y%m%d%H%M%S)
+IMAGE_PULL_POLICY ?= IfNotPresent
 IMAGE := $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 IMAGE_GOOS ?= linux
 IMAGE_GOARCH ?= $(shell $(GO) env GOARCH)
@@ -31,7 +33,7 @@ CRD_WAIT_TIMEOUT ?= 60s
 CONTROLLER_WAIT_TIMEOUT ?= 120s
 
 .PHONY: help tools envtest-tools doctor build container-binary image-build image-load test envtest vet fmt fmt-fix docs-check manifests-check helm-template check \
-	cluster-check deploy-crds wait-crds undeploy-crds deploy wait-controller deploy-local undeploy-local smoke clean
+	cluster-check deploy-crds wait-crds undeploy-crds deploy restart-controller wait-controller deploy-local deploy-local-with-image undeploy-local smoke clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -63,7 +65,7 @@ image-build: container-binary ## Build local controller container image
 	docker build --build-arg BINARY=$(patsubst $(ROOT_DIR)/%,%,$(CONTAINER_BIN)) -t $(IMAGE) .
 
 image-load: image-build ## Load local controller image into minikube
-	$(MINIKUBE) image load $(IMAGE)
+	$(MINIKUBE) image load --overwrite=true --daemon=true $(IMAGE)
 
 test: ## Run unit tests
 	$(GO) test ./...
@@ -94,7 +96,8 @@ helm-template: ## Render Helm chart
 	$(HELM) template $(RELEASE_NAME) charts/namespace-class \
 		--namespace $(RELEASE_NAMESPACE) \
 		--set image.repository=$(IMAGE_REPOSITORY) \
-		--set image.tag=$(IMAGE_TAG) >/tmp/namespace-class-helm-rendered.yaml
+		--set image.tag=$(IMAGE_TAG) \
+		--set image.pullPolicy=$(IMAGE_PULL_POLICY) >/tmp/namespace-class-helm-rendered.yaml
 
 check: docs-check fmt test envtest vet manifests-check helm-template ## Run local aggregate verification
 
@@ -119,13 +122,29 @@ deploy: deploy-crds ## Deploy controller chart into current cluster
 		--namespace $(RELEASE_NAMESPACE) \
 		--create-namespace \
 		--set image.repository=$(IMAGE_REPOSITORY) \
-		--set image.tag=$(IMAGE_TAG)
+		--set image.tag=$(IMAGE_TAG) \
+		--set image.pullPolicy=$(IMAGE_PULL_POLICY)
 
 wait-controller: ## Wait for controller Deployment to become Available
 	$(KUBECTL) -n $(RELEASE_NAMESPACE) rollout status deployment/$(RELEASE_NAME)-controller --timeout=$(CONTROLLER_WAIT_TIMEOUT)
 	$(KUBECTL) -n $(RELEASE_NAMESPACE) wait --for=condition=Available deployment/$(RELEASE_NAME)-controller --timeout=$(CONTROLLER_WAIT_TIMEOUT)
 
-deploy-local: deploy-crds image-load deploy wait-controller smoke ## Build, load, deploy, and smoke-test controller in minikube
+restart-controller: ## Restart controller Deployment after loading a same-tag local image
+	$(KUBECTL) -n $(RELEASE_NAMESPACE) rollout restart deployment/$(RELEASE_NAME)-controller
+
+deploy-local: ## Build, load, deploy, and smoke-test controller in minikube
+	$(MAKE) deploy-local-with-image IMAGE_TAG=$(LOCAL_IMAGE_TAG) IMAGE_PULL_POLICY=Never
+
+deploy-local-with-image: deploy-crds image-load
+	$(HELM) upgrade --install $(RELEASE_NAME) charts/namespace-class \
+		--namespace $(RELEASE_NAMESPACE) \
+		--create-namespace \
+		--set image.repository=$(IMAGE_REPOSITORY) \
+		--set image.tag=$(IMAGE_TAG) \
+		--set image.pullPolicy=$(IMAGE_PULL_POLICY)
+	$(MAKE) restart-controller
+	$(MAKE) wait-controller
+	$(MAKE) smoke
 
 undeploy-local: ## Uninstall local controller Helm release
 	@if $(HELM) status $(RELEASE_NAME) --namespace $(RELEASE_NAMESPACE) >/dev/null 2>&1; then \

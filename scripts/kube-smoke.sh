@@ -9,6 +9,14 @@ RELEASE_NAMESPACE="${RELEASE_NAMESPACE:-namespace-class-system}"
 CRD_WAIT_TIMEOUT="${CRD_WAIT_TIMEOUT:-60s}"
 CONTROLLER_WAIT_TIMEOUT="${CONTROLLER_WAIT_TIMEOUT:-120s}"
 
+cleanup_behavior_smoke() {
+  if [[ -n "${BEHAVIOR_SMOKE_NAME:-}" ]]; then
+    kubectl delete --ignore-not-found=true namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
+    kubectl delete --ignore-not-found=true namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
+    kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME"
+  fi
+}
+
 kubectl cluster-info >/dev/null
 kubectl get nodes
 
@@ -25,6 +33,49 @@ if kubectl -n "$RELEASE_NAMESPACE" get deployment "$RELEASE_NAME-controller" >/d
   echo "Checking controller Deployment is available"
   kubectl -n "$RELEASE_NAMESPACE" rollout status "deployment/$RELEASE_NAME-controller" --timeout="$CONTROLLER_WAIT_TIMEOUT"
   kubectl -n "$RELEASE_NAMESPACE" wait --for=condition=Available "deployment/$RELEASE_NAME-controller" --timeout="$CONTROLLER_WAIT_TIMEOUT"
+
+  echo "Checking controller creates NamespaceClassBinding"
+  BEHAVIOR_SMOKE_NAME="${BEHAVIOR_SMOKE_NAME:-namespace-class-smoke-$(date +%s)}"
+  trap cleanup_behavior_smoke EXIT
+
+  kubectl apply -f - <<YAML
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: $BEHAVIOR_SMOKE_NAME
+spec:
+  resources: []
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $BEHAVIOR_SMOKE_NAME
+  labels:
+    namespaceclass.akuity.io/name: $BEHAVIOR_SMOKE_NAME
+YAML
+
+  wait_seconds="${CONTROLLER_WAIT_TIMEOUT%s}"
+  if [[ "$wait_seconds" == "$CONTROLLER_WAIT_TIMEOUT" ]]; then
+    wait_seconds=120
+  fi
+  for ((i = 0; i < wait_seconds; i++)); do
+    if kubectl get "namespaceclassbinding/$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  kubectl get "namespaceclassbinding/$BEHAVIOR_SMOKE_NAME"
+  kubectl wait --for=condition=Ready "namespaceclassbinding/$BEHAVIOR_SMOKE_NAME" --timeout="$CONTROLLER_WAIT_TIMEOUT"
+  class_name="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.spec.className}')"
+  if [[ "$class_name" != "$BEHAVIOR_SMOKE_NAME" ]]; then
+    echo "expected binding className $BEHAVIOR_SMOKE_NAME, got $class_name" >&2
+    exit 1
+  fi
+  observed_uid="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.status.observedNamespaceUID}')"
+  if [[ -z "$observed_uid" ]]; then
+    echo "expected binding status.observedNamespaceUID to be set" >&2
+    exit 1
+  fi
 else
   echo "Controller Deployment not found; skipping controller readiness check"
 fi

@@ -15,3 +15,7 @@
 - Added a no-op controller-runtime manager entrypoint with health and readiness probes.
 - Added a local image and deployment loop: `Dockerfile`, `make image-build`, `make image-load`, `make deploy-local`, `make wait-crds`, `make wait-controller`, and `make undeploy-local`.
 - Upgraded cluster smoke checks to wait for CRD establishment and verify controller Deployment availability when the controller is installed.
+- Added handwritten Go API types and scheme registration for `NamespaceClass` and `NamespaceClassBinding`.
+- Added namespace reconciliation for the first business slice: labeled namespaces now create or update cluster-scoped `NamespaceClassBinding` objects with basic Ready status.
+- Upgraded smoke to create a temporary `NamespaceClass` and labeled `Namespace`, wait for `NamespaceClassBinding` Ready, verify binding fields, and clean up.
+- Changed `make deploy-local` to use a unique timestamped local image tag so minikube does not keep running an older same-tag image.
