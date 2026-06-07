@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -105,9 +106,13 @@ func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *c
 	}
 
 	inventory := []namespaceclassv1alpha1.ResourceRef{}
+	previousInventory := append([]namespaceclassv1alpha1.ResourceRef(nil), binding.Status.Inventory...)
 	if namespaceClass != nil {
 		refs, err := r.applyManagedResources(ctx, namespace, namespaceClass)
 		if err != nil {
+			return err
+		}
+		if err := r.deleteStaleManagedResources(ctx, namespace, previousInventory, refs); err != nil {
 			return err
 		}
 		inventory = refs
@@ -145,12 +150,57 @@ func (r *NamespaceReconciler) applyManagedResources(ctx context.Context, namespa
 	}
 
 	sort.Slice(refs, func(i, j int) bool {
-		left := refs[i]
-		right := refs[j]
-		return fmt.Sprintf("%s/%s/%s/%s", left.APIVersion, left.Kind, left.Namespace, left.Name) <
-			fmt.Sprintf("%s/%s/%s/%s", right.APIVersion, right.Kind, right.Namespace, right.Name)
+		return resourceRefKey(refs[i]) < resourceRefKey(refs[j])
 	})
 	return refs, nil
+}
+
+func (r *NamespaceReconciler) deleteStaleManagedResources(ctx context.Context, namespace *corev1.Namespace, previousInventory, desiredInventory []namespaceclassv1alpha1.ResourceRef) error {
+	desiredKeys := map[string]struct{}{}
+	for _, ref := range desiredInventory {
+		desiredKeys[resourceRefKey(ref)] = struct{}{}
+	}
+
+	for _, ref := range previousInventory {
+		if _, found := desiredKeys[resourceRefKey(ref)]; found {
+			continue
+		}
+
+		object, err := objectFromResourceRef(ref)
+		if err != nil {
+			return fmt.Errorf("prepare stale inventory ref: %w", err)
+		}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: object.GetNamespace(), Name: object.GetName()}, object); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("get stale %s/%s: %w", ref.Kind, ref.Name, err)
+		}
+
+		if !isManagedByNamespace(object, namespace) {
+			return fmt.Errorf("stale resource %s/%s is not owned by this NamespaceClass binding", ref.Kind, ref.Name)
+		}
+		if err := r.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete stale %s/%s: %w", ref.Kind, ref.Name, err)
+		}
+	}
+	return nil
+}
+
+func resourceRefKey(ref namespaceclassv1alpha1.ResourceRef) string {
+	return fmt.Sprintf("%s/%s/%s/%s", ref.APIVersion, ref.Kind, ref.Namespace, ref.Name)
+}
+
+func objectFromResourceRef(ref namespaceclassv1alpha1.ResourceRef) (*unstructured.Unstructured, error) {
+	groupVersion, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+	}
+	object := &unstructured.Unstructured{}
+	object.SetGroupVersionKind(groupVersion.WithKind(ref.Kind))
+	object.SetNamespace(ref.Namespace)
+	object.SetName(ref.Name)
+	return object, nil
 }
 
 func rawToUnstructured(raw runtime.RawExtension) (*unstructured.Unstructured, error) {
@@ -217,13 +267,17 @@ func (r *NamespaceReconciler) ensureCanManage(ctx context.Context, desired *unst
 		return fmt.Errorf("get existing resource: %w", err)
 	}
 
-	labels := existing.GetLabels()
-	annotations := existing.GetAnnotations()
-	if labels[namespaceclassv1alpha1.ManagedLabelKey] != "true" ||
-		annotations[namespaceclassv1alpha1.OwnerNamespaceUIDAnnoKey] != string(namespace.UID) {
+	if !isManagedByNamespace(existing, namespace) {
 		return fmt.Errorf("resource already exists and is not owned by this NamespaceClass binding")
 	}
 	return nil
+}
+
+func isManagedByNamespace(object *unstructured.Unstructured, namespace *corev1.Namespace) bool {
+	labels := object.GetLabels()
+	annotations := object.GetAnnotations()
+	return labels[namespaceclassv1alpha1.ManagedLabelKey] == "true" &&
+		annotations[namespaceclassv1alpha1.OwnerNamespaceUIDAnnoKey] == string(namespace.UID)
 }
 
 func addManagedMetadata(object *unstructured.Unstructured, namespace *corev1.Namespace, className string) {

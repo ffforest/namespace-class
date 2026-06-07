@@ -22,3 +22,5 @@
 - Added dynamic server-side apply for rendered `NamespaceClass.spec.resources`, starting with namespaced resources such as `ServiceAccount`.
 - Added managed-resource inventory updates in `NamespaceClassBinding.status.inventory` for successfully applied resources.
 - Upgraded envtest and smoke to verify a managed `ServiceAccount` is created and recorded in binding inventory.
+- Added stale managed resource deletion: resources present in previous binding inventory but absent from the current desired set are deleted only when ownership markers match the namespace UID.
+- Upgraded envtest and smoke to verify a `NamespaceClass` resource update creates the new managed `ServiceAccount`, deletes the stale one, and updates binding inventory.

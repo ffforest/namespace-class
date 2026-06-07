@@ -12,6 +12,7 @@ CONTROLLER_WAIT_TIMEOUT="${CONTROLLER_WAIT_TIMEOUT:-120s}"
 cleanup_behavior_smoke() {
   if [[ -n "${BEHAVIOR_SMOKE_NAME:-}" ]]; then
     kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME"
+    kubectl delete --ignore-not-found=true serviceaccount "$BEHAVIOR_SMOKE_NAME-old" --namespace "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespaceclassbinding "$BEHAVIOR_SMOKE_NAME"
     kubectl delete --ignore-not-found=true namespace "$BEHAVIOR_SMOKE_NAME" --wait=false
     kubectl delete --ignore-not-found=true namespaceclass "$BEHAVIOR_SMOKE_NAME"
@@ -35,7 +36,7 @@ if kubectl -n "$RELEASE_NAMESPACE" get deployment "$RELEASE_NAME-controller" >/d
   kubectl -n "$RELEASE_NAMESPACE" rollout status "deployment/$RELEASE_NAME-controller" --timeout="$CONTROLLER_WAIT_TIMEOUT"
   kubectl -n "$RELEASE_NAMESPACE" wait --for=condition=Available "deployment/$RELEASE_NAME-controller" --timeout="$CONTROLLER_WAIT_TIMEOUT"
 
-  echo "Checking controller creates NamespaceClassBinding"
+  echo "Checking controller creates NamespaceClassBinding and reconciles managed resources"
   BEHAVIOR_SMOKE_NAME="${BEHAVIOR_SMOKE_NAME:-namespace-class-smoke-$(date +%s)}"
   trap cleanup_behavior_smoke EXIT
 
@@ -49,7 +50,7 @@ spec:
     - apiVersion: v1
       kind: ServiceAccount
       metadata:
-        name: $BEHAVIOR_SMOKE_NAME-app
+        name: $BEHAVIOR_SMOKE_NAME-old
 ---
 apiVersion: v1
 kind: Namespace
@@ -81,10 +82,10 @@ YAML
     echo "expected binding status.observedNamespaceUID to be set" >&2
     exit 1
   fi
-  kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME"
+  kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-old" --namespace "$BEHAVIOR_SMOKE_NAME"
   inventory_name="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.status.inventory[0].name}')"
-  if [[ "$inventory_name" != "$BEHAVIOR_SMOKE_NAME-app" ]]; then
-    echo "expected first inventory entry to be $BEHAVIOR_SMOKE_NAME-app, got $inventory_name" >&2
+  if [[ "$inventory_name" != "$BEHAVIOR_SMOKE_NAME-old" ]]; then
+    echo "expected first inventory entry to be $BEHAVIOR_SMOKE_NAME-old, got $inventory_name" >&2
     exit 1
   fi
   inventory_namespace="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{.status.inventory[0].namespace}')"
@@ -92,6 +93,56 @@ YAML
     echo "expected first inventory entry namespace to be $BEHAVIOR_SMOKE_NAME, got $inventory_namespace" >&2
     exit 1
   fi
+
+  echo "Checking controller deletes stale managed resources"
+  kubectl apply -f - <<YAML
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: $BEHAVIOR_SMOKE_NAME
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: $BEHAVIOR_SMOKE_NAME-app
+YAML
+  kubectl annotate namespace "$BEHAVIOR_SMOKE_NAME" test.namespaceclass.akuity.io/reconcile=updated-class --overwrite
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected ServiceAccount $BEHAVIOR_SMOKE_NAME-app to be created" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-app" --namespace "$BEHAVIOR_SMOKE_NAME"
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-old" --namespace "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected stale ServiceAccount $BEHAVIOR_SMOKE_NAME-old to be deleted" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    inventory_names="$(kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" -o jsonpath='{range .status.inventory[*]}{.name}{" "}{end}')"
+    if [[ " $inventory_names " == *" $BEHAVIOR_SMOKE_NAME-app "* && " $inventory_names " != *" $BEHAVIOR_SMOKE_NAME-old "* ]]; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected inventory to contain $BEHAVIOR_SMOKE_NAME-app and omit $BEHAVIOR_SMOKE_NAME-old, got: $inventory_names" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 else
   echo "Controller Deployment not found; skipping controller readiness check"
 fi
