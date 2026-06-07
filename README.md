@@ -13,6 +13,10 @@ The intended solution covers:
 - A controller that watches `Namespace`, `NamespaceClass`, and `NamespaceClassBinding`.
 - Server-side apply for managed resources.
 - Support for both namespaced and cluster-scoped resources.
+- Template variables for namespace name, UID, labels, annotations, and class name.
+- Runtime GVK allow/deny policy with `ClusterRoleBinding` denied by default.
+- Namespace finalizer cleanup for cluster-scoped managed resources.
+- First-slice drift repair through primary-object watches and periodic requeue.
 - Local verification through Go tests, manifest validation, Helm rendering, and minikube smoke checks.
 
 ## Quick Start
@@ -28,8 +32,7 @@ If minikube is running:
 
 ```bash
 make cluster-check
-make deploy-crds
-make smoke
+make deploy-local
 ```
 
 ## Common Commands
@@ -40,6 +43,8 @@ make tools             # install project-local kubectl and helm
 make envtest-tools     # prefetch project-local envtest apiserver/etcd binaries
 make lint-tools        # install project-local golangci-lint
 make doctor            # check local prerequisites
+make build             # build controller binary
+make container-binary  # build linux controller binary for container image
 make mod-tidy          # tidy Go module files
 make mod-check         # verify Go module files are tidy
 make fmt               # check Go formatting
@@ -54,16 +59,25 @@ make helm-template     # render Helm chart
 make check             # local aggregate verification
 make cluster-check     # verify kubectl can reach minikube/current cluster
 make deploy-crds       # install CRDs into the current cluster
+make wait-crds         # wait for CRDs to become Established
+make undeploy-crds     # remove CRDs from the current cluster
+make deploy            # install or upgrade the controller Helm chart
+make wait-controller   # wait for controller Deployment availability
+make restart-controller # restart the deployed controller Deployment
 make image-build       # build namespace-class-controller:dev locally
 make image-load        # load namespace-class-controller:dev into minikube
 make deploy-local      # build, load, install, restart, wait, and smoke-test locally
+make undeploy-local    # uninstall the local controller Helm release
 make smoke             # run cluster smoke checks
 make rbac-check        # inspect deployed controller ServiceAccount RBAC
+make clean             # remove local build outputs
 ```
 
 `make deploy-local` uses a unique local image tag derived from `IMAGE_TAG` and the current timestamp so minikube does not reuse an older same-tag image.
 
 `make envtest` runs `make envtest-tools` automatically. Run `make envtest-tools` directly when you want to prefetch or refresh the envtest assets before the full verification path.
+
+`make smoke` always checks CRDs and server-side sample validation. It runs full controller behavior checks only when the controller Deployment is installed in `RELEASE_NAMESPACE`.
 
 ## Current State
 
