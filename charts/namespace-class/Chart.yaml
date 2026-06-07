@@ -1,0 +1,7 @@
+apiVersion: v2
+name: namespace-class
+description: NamespaceClass controller Helm chart
+type: application
+version: 0.1.0
+appVersion: "dev"
+

@@ -1,0 +1,16 @@
+replicaCount: 1
+
+image:
+  repository: namespace-class-controller
+  tag: dev
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: namespace-class-controller
+
+manager:
+  args:
+    - --leader-elect
+  resources: {}
+
