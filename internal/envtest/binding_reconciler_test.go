@@ -539,6 +539,101 @@ func TestNamespaceClassLabelSwitchCreatesNewResourcesAndDeletesOldResources(t *t
 	}
 }
 
+func TestNamespaceClassLabelRemovalDeletesResourcesAndBinding(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join(repoRoot(t), "config", "crd", "bases")},
+	}
+
+	restConfig, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("start envtest: %v", err)
+	}
+	defer func() {
+		if err := testEnv.Stop(); err != nil {
+			t.Fatalf("stop envtest: %v", err)
+		}
+	}()
+
+	mgr, err := ncmanager.New(restConfig, ncmanager.Options{
+		MetricsBindAddress:     "0",
+		HealthProbeBindAddress: freeLocalAddress(t),
+		LeaderElection:         false,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	managerCtx, stopManager := context.WithCancel(ctx)
+	defer stopManager()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mgr.Start(managerCtx)
+	}()
+	defer func() {
+		stopManager()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("manager returned error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("manager did not stop")
+		}
+	}()
+
+	kubeClient, err := client.New(restConfig, client.Options{})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	namespaceClass := newUnstructured(namespaceClassGVK, "", "public-network")
+	if err := unstructured.SetNestedSlice(namespaceClass.Object, []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ServiceAccount",
+			"metadata": map[string]interface{}{
+				"name": "public-app",
+			},
+		},
+	}, "spec", "resources"); err != nil {
+		t.Fatalf("set resources: %v", err)
+	}
+	if err := kubeClient.Create(ctx, namespaceClass); err != nil {
+		t.Fatalf("create namespaceclass: %v", err)
+	}
+
+	namespace := newUnstructured(namespaceGVK, "", "web-portal")
+	namespace.SetLabels(map[string]string{
+		"namespaceclass.akuity.io/name": "public-network",
+	})
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	waitForObject(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	binding := waitForBindingClass(t, ctx, kubeClient, "web-portal", "public-network")
+	if !hasInventoryEntry(t, binding, "v1", "ServiceAccount", "web-portal", "public-app") {
+		t.Fatalf("expected ServiceAccount inventory entry, got %#v", binding.Object["status"])
+	}
+
+	namespace = newUnstructured(namespaceGVK, "", "web-portal")
+	if err := kubeClient.Get(ctx, client.ObjectKey{Name: "web-portal"}, namespace); err != nil {
+		t.Fatalf("get namespace for label removal: %v", err)
+	}
+	labels := namespace.GetLabels()
+	delete(labels, "namespaceclass.akuity.io/name")
+	namespace.SetLabels(labels)
+	if err := kubeClient.Update(ctx, namespace); err != nil {
+		t.Fatalf("remove namespace class label: %v", err)
+	}
+
+	waitForObjectDeleted(t, ctx, kubeClient, serviceAccountGVK, "web-portal", "public-app")
+	waitForBindingDeleted(t, ctx, kubeClient, "web-portal")
+}
+
 func waitForBinding(t *testing.T, ctx context.Context, kubeClient client.Client, name string) *unstructured.Unstructured {
 	t.Helper()
 
@@ -578,6 +673,29 @@ func waitForBindingClass(t *testing.T, ctx context.Context, kubeClient client.Cl
 
 	t.Fatalf("binding %q did not observe class %q: %v", name, className, lastErr)
 	return nil
+}
+
+func waitForBindingDeleted(t *testing.T, ctx context.Context, kubeClient client.Client, name string) {
+	t.Helper()
+
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		binding := newUnstructured(namespaceClassBindingGVK, "", name)
+		err := kubeClient.Get(ctx, client.ObjectKey{Name: name}, binding)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if err != nil {
+			lastErr = err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if lastErr != nil {
+		t.Fatalf("binding %q was not deleted: %v", name, lastErr)
+	}
+	t.Fatalf("binding %q was not deleted", name)
 }
 
 func nestedString(t *testing.T, object *unstructured.Unstructured, fields ...string) string {

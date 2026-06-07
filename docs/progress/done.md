@@ -28,3 +28,5 @@
 - Upgraded envtest and smoke to verify `NamespaceClass` updates are applied without manually modifying the namespace.
 - Added envtest coverage for namespace class switching: changing the namespace label from class A to class B creates the new class resource, deletes the old class resource, and updates binding inventory.
 - Upgraded smoke to verify class switching end-to-end in minikube.
+- Added cleanup for namespace class label removal: managed resources from binding inventory are deleted and the `NamespaceClassBinding` is removed after cleanup succeeds.
+- Upgraded envtest and smoke to verify label removal cleanup.

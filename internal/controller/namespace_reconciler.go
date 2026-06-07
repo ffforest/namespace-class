@@ -122,6 +122,9 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 
 	className := namespace.Labels[namespaceclassv1alpha1.ClassLabelKey]
 	if className == "" {
+		if err := r.cleanupBindingForNamespace(ctx, namespace); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -129,6 +132,25 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *NamespaceReconciler) cleanupBindingForNamespace(ctx context.Context, namespace *corev1.Namespace) error {
+	binding := &namespaceclassv1alpha1.NamespaceClassBinding{}
+	if err := r.Get(ctx, client.ObjectKey{Name: namespace.Name}, binding); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get namespaceclassbinding for cleanup: %w", err)
+	}
+
+	previousInventory := append([]namespaceclassv1alpha1.ResourceRef(nil), binding.Status.Inventory...)
+	if err := r.deleteStaleManagedResources(ctx, namespace, previousInventory, nil); err != nil {
+		return err
+	}
+	if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete namespaceclassbinding after cleanup: %w", err)
+	}
+	return nil
 }
 
 func (r *NamespaceReconciler) reconcileBinding(ctx context.Context, namespace *corev1.Namespace, className string) error {

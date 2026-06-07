@@ -195,6 +195,31 @@ YAML
     fi
     sleep 1
   done
+
+  echo "Checking controller cleans up after namespace class label removal"
+  kubectl label namespace "$BEHAVIOR_SMOKE_NAME" namespaceclass.akuity.io/name-
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get serviceaccount "$BEHAVIOR_SMOKE_NAME-internal" --namespace "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected ServiceAccount $BEHAVIOR_SMOKE_NAME-internal to be deleted after label removal" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for ((i = 0; i < wait_seconds; i++)); do
+    if ! kubectl get namespaceclassbinding "$BEHAVIOR_SMOKE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    if ((i == wait_seconds - 1)); then
+      echo "expected NamespaceClassBinding $BEHAVIOR_SMOKE_NAME to be deleted after label removal" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 else
   echo "Controller Deployment not found; skipping controller readiness check"
 fi
