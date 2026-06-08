@@ -63,7 +63,7 @@ make wait-crds         # wait for CRDs to become Established
 make undeploy-crds     # remove CRDs from the current cluster
 make deploy            # install or upgrade the controller Helm chart
 make wait-controller   # wait for controller Deployment availability
-make restart-controller # restart the deployed controller Deployment
+make restart-controller # restart controller Deployment after loading a same-tag local image
 make image-build       # build namespace-class-controller:dev locally
 make image-load        # load namespace-class-controller:dev into minikube
 make deploy-local      # build, load, install, restart, wait, and smoke-test locally
