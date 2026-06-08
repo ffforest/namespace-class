@@ -1,45 +1,49 @@
-# NamespaceClass 设计文档
+# NamespaceClass Design
 
-## 1. 背景
+## 1. Background
 
-Kubernetes 管理员希望为 namespace 定义一组可复用的“class”。每个 `NamespaceClass` 描述一组附加资源、策略或配置。当某个 `Namespace` 绑定到某个 class 时，controller 自动在该 namespace 中创建并维护这些资源。
+Kubernetes administrators want to define reusable classes of namespaces. A `NamespaceClass` describes the additional resources, policies, or configuration that should be created and maintained when a `Namespace` is bound to that class.
 
-示例：
+Example classes:
 
-- `public-network`：创建允许公网访问的 `NetworkPolicy`
-- `internal-network`：创建仅允许公司 VPN 访问的 `NetworkPolicy`
+- `public-network`: create policies that allow public network access.
+- `internal-network`: create policies that restrict access to internal networks or VPN ranges.
 
-该设计的核心不是 hard-code 某几类资源，而是提供一个通用机制：管理员可以在 `NamespaceClass` 中声明任意 Kubernetes 资源模板，controller 根据 namespace 的 class label 维护实际资源。
+The design does not hard-code specific resource kinds. The core mechanism is a generic controller that accepts raw Kubernetes resource templates in `NamespaceClass` and reconciles them for namespaces labeled with that class.
 
-## 2. 目标
+## 2. Goals
 
-本设计需要满足以下目标：
+1. Provide a `NamespaceClass` CRD for declaring namespace classes and their managed resource templates.
+2. Watch namespace creation and updates, then reconcile resources based on the namespace class label.
+3. Support switching a namespace from one class to another, including cleanup of resources that are no longer desired.
+4. Support updates to a `NamespaceClass`, then fan out reconciliation to every namespace currently bound to that class.
+5. Support arbitrary Kubernetes resources, including namespaced and cluster-scoped resources.
+6. Follow the standard Kubernetes declarative reconciliation model.
+7. Keep reconciliation recoverable when apply or delete operations partially fail.
 
-1. 提供 `NamespaceClass` CRD，用于声明 namespace class 及其附属资源模板。
-2. 监听 `Namespace` 创建和更新，根据 namespace label 创建对应 class 的资源。
-3. 支持 namespace 切换 class，并清理旧 class 产生但新 class 不再需要的资源。
-4. 支持 `NamespaceClass` 更新后，同步所有使用该 class 的 namespace。
-5. 支持任意 Kubernetes 资源类型，包括 namespaced resources 和 cluster-scoped resources，而不限于 `NetworkPolicy`、`ServiceAccount` 等固定 kind。
-6. 尽量遵循 Kubernetes controller 的 declarative reconciliation 模型。
+## 3. Non-Goals
 
-## 3. 非目标
+1. No rich template language. The first version only supports a small set of string substitutions.
+2. No class inheritance.
+3. No cross-cluster distribution.
+4. No UI.
+5. No automatic adoption of existing resources that are not already marked as managed by this controller.
+6. No guarantee that cluster-scoped resources can be globally named without conflicts. Template authors are responsible for unique names.
+7. No dynamic informer watch for every arbitrary managed resource kind in the first version.
 
-第一版不解决以下问题：
-
-1. 不提供复杂模板语言，只支持最小变量替换，例如 namespace name。
-2. 不做多层 class 继承。
-3. 不做跨集群分发。
-4. 不提供图形化管理界面。
-5. 不试图接管已经存在但不是 controller 管理的资源。
-6. 不保证所有集群级资源都能无冲突地自动命名，模板作者需要为 cluster-scoped resources 负责。
-
-## 4. API 设计
+## 4. API Design
 
 ### 4.1 NamespaceClass
 
-`NamespaceClass` 是 cluster-scoped CRD。
+`NamespaceClass` is a cluster-scoped CRD.
 
-建议 API group：
+Recommended API group:
+
+```text
+namespaceclass.akuity.io
+```
+
+Example:
 
 ```yaml
 apiVersion: namespaceclass.akuity.io/v1alpha1
@@ -48,19 +52,21 @@ metadata:
   name: public-network
 spec:
   resources:
-    - apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
+    - apiVersion: v1
+      kind: ServiceAccount
       metadata:
-        name: allow-public-ingress
-      spec:
-        podSelector: {}
-        policyTypes:
-          - Ingress
-        ingress:
-          - {}
+        name: public-app
 ```
 
-Go 类型可以表达为：
+The key field is:
+
+```yaml
+spec:
+  resources:
+    - <raw Kubernetes object>
+```
+
+Go shape:
 
 ```go
 type NamespaceClassSpec struct {
@@ -68,22 +74,11 @@ type NamespaceClassSpec struct {
 }
 ```
 
-CRD schema 对 `spec.resources` 使用 preserve unknown fields，允许保存任意 Kubernetes object：
+The CRD schema preserves unknown fields for `spec.resources`, because every entry is a raw Kubernetes object.
 
-```yaml
-spec:
-  type: object
-  properties:
-    resources:
-      type: array
-      items:
-        type: object
-        x-kubernetes-preserve-unknown-fields: true
-```
+### 4.2 Namespace Binding
 
-### 4.2 Namespace 绑定方式
-
-namespace 通过 label 绑定 class：
+A namespace is bound to a class through a label:
 
 ```yaml
 apiVersion: v1
@@ -94,19 +89,27 @@ metadata:
     namespaceclass.akuity.io/name: public-network
 ```
 
-label key：
+The label key is:
 
 ```text
 namespaceclass.akuity.io/name
 ```
 
-选择 label 而不是 annotation 的原因是：controller 需要高效判断 namespace 是否绑定了 class，并且后续可以通过 label selector 或 informer index 做批量查询。第一版实际 fan-out 使用 `NamespaceClassBinding.spec.className` 索引，因为 binding 已经记录了 controller 观察到的当前绑定状态和 inventory。
+The controller uses the namespace name as the reconcile key. `NamespaceClass` and `NamespaceClassBinding` events are converted into namespace reconcile requests.
 
 ### 4.3 NamespaceClassBinding
 
-controller 为每个被 `NamespaceClass` 管理过的 namespace 创建一个 cluster-scoped `NamespaceClassBinding`。该对象不是用户主要操作入口，而是 controller 的持久状态对象，用来保存绑定状态、同步状态和 inventory。
+The controller creates one cluster-scoped `NamespaceClassBinding` for each namespace that has been managed by `NamespaceClass`.
 
-示例：
+This object is not the primary user-facing API. It is durable controller state for:
+
+- the namespace name,
+- the currently observed class name,
+- observed generations,
+- readiness conditions,
+- managed resource inventory.
+
+Example:
 
 ```yaml
 apiVersion: namespaceclass.akuity.io/v1alpha1
@@ -127,20 +130,20 @@ status:
   conditions:
     - type: Ready
       status: "True"
-      reason: ReconcileSucceeded
+      reason: BindingRecorded
 ```
 
-`NamespaceClassBinding` 选择 cluster-scoped 的原因是：
+The binding is cluster-scoped because:
 
-1. namespace 删除时，namespace 内对象会被清理；如果 inventory 存在 namespace 内，controller 可能丢失清理 cluster-scoped resources 所需的信息。
-2. `NamespaceClass` 本身是 cluster-scoped，对应 binding 也更适合表达集群级状态。
-3. 管理员可以直接查询每个 namespace 的 class 绑定、同步 generation、inventory 和错误 conditions。
+1. Namespace deletion removes namespaced objects. Inventory stored inside the namespace could disappear before cluster-scoped resources are cleaned up.
+2. `NamespaceClass` is cluster-scoped, so binding state also naturally belongs at cluster scope.
+3. Administrators can query one object to inspect class binding, status, generation, inventory, and failure conditions.
 
-binding 的 name 可以直接使用 namespace name，因为 namespace name 在集群内唯一。
+The binding name is the namespace name, because namespace names are cluster-unique.
 
-## 5. 资源模板规则
+## 5. Resource Template Rules
 
-`NamespaceClass.spec.resources` 中的每个对象都必须包含：
+Every object in `NamespaceClass.spec.resources` must contain:
 
 ```yaml
 apiVersion: ...
@@ -149,15 +152,31 @@ metadata:
   name: ...
 ```
 
-controller 对模板进行如下处理：
+The controller processes each template as follows:
 
-1. 如果资源是 namespaced resource，强制设置 `metadata.namespace` 为目标 namespace。
-2. 如果资源是 cluster-scoped resource，不设置 namespace。
-3. 如果模板中已经为 namespaced resource 写了别的 namespace，controller 拒绝该模板或覆盖为目标 namespace。推荐拒绝并记录错误，因为这通常代表管理员配置有误。
-4. controller 为创建的资源添加统一的 labels 和 annotations。
-5. controller 不允许模板覆盖内部管理用的 labels 和 annotations。
+1. Render supported string templates.
+2. Parse it into `unstructured.Unstructured`.
+3. Validate required `apiVersion`, `kind`, and `metadata.name`.
+4. Validate the GVK against the runtime allowlist/denylist policy.
+5. Use `RESTMapper` to resolve whether the resource is namespaced or cluster-scoped.
+6. Force namespaced resources into the target namespace.
+7. Clear namespace for cluster-scoped resources.
+8. Reject existing resources that are not already marked as managed by this namespace binding.
+9. Add controller management labels and annotations.
+10. Apply through server-side apply.
 
-controller 添加的元数据示例：
+The current implementation normalizes namespace scope during reconciliation:
+
+- namespaced resources are placed in the target namespace, even if the template
+  specified another namespace;
+- cluster-scoped resources have `metadata.namespace` cleared.
+
+This keeps runtime behavior deterministic. A stricter validating webhook should
+reject a namespaced template that explicitly targets a different namespace,
+because that usually indicates a configuration error or an attempted escape from
+the namespace binding.
+
+Managed metadata:
 
 ```yaml
 metadata:
@@ -169,11 +188,14 @@ metadata:
     namespaceclass.akuity.io/owner-namespace-uid: "<namespace-uid>"
 ```
 
-### 5.1 模板变量
+Templates should not set controller-reserved labels or annotations. The current
+runtime path overwrites reserved keys when it attaches ownership metadata. The
+planned webhook should reject those templates earlier so authors get a clear
+configuration error instead of relying on overwrite behavior.
 
-第一版只支持非常小的变量集合，避免演变成复杂模板系统。
+### 5.1 Template Variables
 
-支持变量：
+The first version supports a deliberately small string-substitution variable set:
 
 ```text
 {{ .Namespace.Name }}
@@ -183,245 +205,263 @@ metadata:
 {{ .Class.Name }}
 ```
 
-约束：
+Constraints:
 
-1. 变量只能用于字符串字段，例如 `metadata.name`、labels、annotations 和 spec 内的字符串值。
-2. 不支持条件、循环、函数、外部数据引用或跨资源引用。
-3. 渲染失败时整个 `NamespaceClass` 被认为无效，controller 不应部分执行该 class。
+1. Variables are only rendered inside string values.
+2. No conditionals, loops, functions, external lookups, or cross-resource references.
+3. Unknown template variables make the whole class reconciliation fail before any apply begins.
 
-该变量集合主要用于 cluster-scoped resources 的唯一命名。例如：
+The main use case is unique naming for cluster-scoped resources:
 
 ```yaml
 metadata:
   name: "{{ .Namespace.Name }}-public-access"
 ```
 
-### 5.2 Validating Admission
+### 5.2 Admission Webhook
 
-由于 `spec.resources` 使用 raw Kubernetes objects，CRD schema 本身无法完成足够强的校验。建议提供 validating admission webhook，在资源进入集群前尽早发现错误。
+Because `spec.resources` stores raw objects, CRD schema validation alone cannot fully validate entries.
 
-当前实现先落地 reconcile 阶段的 runtime GVK guard，阻止 controller 对被拒绝的 GVK 执行 apply。admission webhook 仍是后续增强，因为它需要额外处理 HTTPS serving certificate、`ValidatingWebhookConfiguration.caBundle` 注入和证书轮换。
+A validating admission webhook is a planned enhancement. It should reject invalid resources earlier, before reconcile time.
 
-webhook 至少校验：
+The planned webhook should validate at least:
 
-1. 每个 resource 都包含 `apiVersion`、`kind`、`metadata.name`。
-2. 同一个 `NamespaceClass` 中不能出现重复的 resource identity。
-3. 模板不能设置 controller 保留的 labels 和 annotations。
-4. namespaced resource 不能写入其他 namespace。
-5. 模板变量必须可解析，且只能出现在允许的字符串字段中。
-6. GVK 必须符合 controller 配置的 allowlist/denylist 策略。
+1. `apiVersion`, `kind`, and `metadata.name` are present.
+2. Desired resource identities are unique within one `NamespaceClass`.
+3. Templates do not set controller-reserved labels or annotations.
+4. Namespaced resources do not explicitly target a namespace different from the
+   bound namespace.
+5. Template variables are within the supported variable set.
+6. The GVK is allowed by configured allowlist/denylist policy.
 
-webhook 无法替代 reconcile 阶段的运行时校验，因为 API discovery、RBAC、quota、admission webhook 和目标对象冲突仍然可能在 apply 时失败。
+The current implementation instead enforces key safety checks at runtime:
 
-## 6. Controller 架构
+- required fields,
+- duplicate desired resource identity,
+- GVK allowlist/denylist,
+- ownership conflicts,
+- namespace scope normalization,
+- unresolved GVK/scope errors.
 
-### 6.1 Watch 对象
+The webhook cannot replace reconcile-time validation, because apply can still fail due to API discovery, RBAC, quotas, admission policies, field ownership conflicts, or target object state.
 
-controller 监听：
+## 6. Controller Architecture
+
+### 6.1 Watched Objects
+
+The controller watches:
 
 1. `Namespace`
 2. `NamespaceClass`
 3. `NamespaceClassBinding`
 
-核心 reconcile key 是 namespace name。即使事件来自 `NamespaceClass`，也会被转换成一个或多个 namespace reconcile 请求。
+`Namespace` is the primary reconcile object. Events from `NamespaceClass` and `NamespaceClassBinding` only enqueue namespace reconcile requests.
 
-对于 `NamespaceClass.spec.resources` 中的任意 GVK，第一版不动态 watch 每一种子资源，只依赖 `Namespace`、`NamespaceClass`、`NamespaceClassBinding` 事件和周期性 resync 修复 drift。原因是 controller-runtime 对编译期已知类型支持很好，例如 `Namespace`、`Deployment`、`NetworkPolicy`；但 `NamespaceClass` 允许管理员在运行时引用任意 GVK，包括新安装的 CRD。要实时 watch 这些资源，需要使用 dynamic informer 和 dynamic client 针对 `unstructured.Unstructured` 在运行时创建 watch，这会引入 RESTMapper/discovery cache、GVK 增删、informer 生命周期、RBAC 失败和内存占用等复杂度。
+The first implementation does not dynamically watch every managed resource GVK. `NamespaceClass.spec.resources` can reference arbitrary GVKs, including CRDs installed after the controller starts. Dynamic managed-resource watches would require dynamic informers, discovery cache handling, RESTMapper refresh, informer lifecycle management, RBAC failure handling, and memory controls.
 
-因此第一版选择更简单的策略：
+Instead, the first version repairs drift through:
 
-1. 创建、class 切换、class 更新通过主要对象事件立即触发。
-2. 用户手动删除或修改 managed resource 后，通过周期性 resync 最终修复。
-3. dynamic informer 作为后续增强，用于缩短 drift 修复延迟。
+1. namespace events,
+2. class fan-out events,
+3. binding events,
+4. periodic requeue.
 
-### 6.2 Namespace Reconciler
+### 6.2 Reconcile Flow
 
-Namespace reconcile 是唯一负责实际 create/update/delete 的路径。
+Namespace reconciliation is the only path that mutates managed resources.
 
-流程：
-
-```text
-1. 读取 Namespace
-2. 如果 Namespace 正在删除，执行清理逻辑，然后返回
-3. 读取 label namespaceclass.akuity.io/name
-4. 如果 label 不存在：
-   4.1 读取 NamespaceClassBinding.status.inventory
-   4.2 删除此前由 NamespaceClass 管理的资源
-   4.3 清空 inventory 并删除 NamespaceClassBinding
-   4.4 返回
-5. 如果 label 存在：
-   5.1 读取对应 NamespaceClass
-   5.2 确保 NamespaceClassBinding 存在，并读取旧 status.inventory
-   5.3 将 spec.resources 转换为 desired resources
-   5.4 对 desired resources 做 server-side apply
-   5.5 删除旧 inventory 中存在但 desired set 中不存在的资源
-   5.6 写回 NamespaceClassBinding.status.inventory 和 conditions
-```
-
-如果 namespace 仍然存在但 `NamespaceClass` 不存在，controller 将 desired set 视为空，根据 binding 中的 inventory 清理已管理资源。清理成功后删除 `NamespaceClassBinding`；清理失败时保留 binding，并写入 `Ready=False` / `CleanupFailed` condition 以便重试和排查。
-
-### 6.3 NamespaceClass 事件处理
-
-当某个 `NamespaceClass` 被创建、spec 更新或删除时：
+High-level flow:
 
 ```text
-1. 通过 NamespaceClassBinding.spec.className=<class-name> 索引找出所有 binding
-2. 从 binding.spec.namespaceName 得到目标 Namespace
-3. 将这些 Namespace enqueue
-4. 由 Namespace Reconciler 完成实际同步
+Namespace event
+  -> read Namespace
+  -> if deleting: finalizer cleanup
+  -> else read namespaceclass.akuity.io/name
+  -> if label missing: cleanup binding inventory and delete binding
+  -> if label exists: reconcile binding and desired resources
 ```
 
-这样可以让 namespace 创建、class 切换、class 更新和 class 删除复用同一套 reconciliation 逻辑。class 删除事件触发 fan-out 后，Namespace Reconciler 会发现 class 不存在，并按空 desired set 清理 binding inventory 中的资源。
+Detailed flow for a labeled namespace:
 
-使用 binding 索引而不是每次扫描所有 namespace 的原因是：
+1. Read the referenced `NamespaceClass`.
+2. If the API server returns `NotFound`, treat the desired set as empty and clean up old inventory.
+3. If any other read error occurs, return an error and requeue. Do not clean up resources.
+4. Ensure the namespace finalizer is present before managed resources are created.
+5. Create or update the `NamespaceClassBinding` spec.
+6. Read previous inventory from binding status.
+7. Render, parse, validate, and prepare every desired resource before applying any resource.
+8. Apply desired resources one by one through server-side apply.
+9. If apply partially fails, record `oldInventory + appliedRefs`, write a failure condition, and skip stale deletion.
+10. Only after every desired resource applies successfully, delete stale resources.
+11. Write final inventory and readiness condition.
+
+### 6.3 NamespaceClass Fan-Out
+
+When a `NamespaceClass` is created, updated, or deleted:
+
+1. List `NamespaceClassBinding` objects indexed by `spec.className`.
+2. Extract each binding's `spec.namespaceName`.
+3. Enqueue those namespaces.
+4. Let namespace reconciliation perform all actual apply/delete work.
+
+This avoids scanning all namespaces on every class update.
+
+### 6.4 NamespaceClassBinding Watch
+
+The controller also watches `NamespaceClassBinding`.
+
+If a binding is deleted while the namespace still has a class label, the binding watch enqueues the namespace and the controller recreates the binding.
+
+This is the first-slice drift repair path for binding state. Managed resources are still not watched dynamically.
+
+## 7. Inventory Design
+
+The controller must remember what it previously managed for a namespace. Without durable inventory, it cannot reliably delete resources that are no longer present in the current desired set.
+
+The first version stores inventory in:
 
 ```text
-1. binding 已经是当前绑定状态和 inventory 的 source of truth
-2. class 更新时只需要触达已经被 controller 管理过的 namespace
-3. 大规模 namespace 场景下避免全量 namespace list/filter
-4. namespace label 切换仍然由 Namespace watch 负责创建或更新 binding
+NamespaceClassBinding.status.inventory
 ```
 
-如果将来需要处理“NamespaceClass 创建时，namespace 已经带 label 但 binding 尚不存在”的特殊恢复场景，可以再增加 namespace label index fan-out 或周期性全量扫描。
-
-## 7. Inventory 设计
-
-controller 需要知道自己上一次为某个 namespace 创建过哪些资源。否则当 class 更新或 namespace 切换 class 时，旧资源可能已经不在新 class spec 中，controller 无法仅凭新 spec 找到需要删除的对象。
-
-第一版使用 cluster-scoped `NamespaceClassBinding.status.inventory` 保存 inventory：
+Each entry stores only identity:
 
 ```yaml
-apiVersion: namespaceclass.akuity.io/v1alpha1
-kind: NamespaceClassBinding
-metadata:
-  name: web-portal
-spec:
-  namespaceName: web-portal
-  className: public-network
-status:
-  inventory:
-    - apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
-      namespace: web-portal
-      name: allow-public-ingress
+apiVersion: v1
+kind: ServiceAccount
+namespace: web-portal
+name: public-app
 ```
 
-资源 identity 使用：
+Identity is:
 
 ```text
 apiVersion + kind + namespace + name
 ```
 
-不能只使用 `name`，因为不同 kind 可以同名。
+Name alone is not enough because different kinds can share names. For cluster-scoped resources, `namespace` is empty.
 
-对于 cluster-scoped resources，`namespace` 字段为空。binding 的 inventory 只保存 identity，不保存完整对象，以降低对象大小和状态漂移风险。
+Inventory does not store full object specs. This keeps binding status smaller and reduces the risk of stale state.
 
-## 8. Apply 与 Delete 策略
+## 8. Apply and Delete Strategy
 
 ### 8.1 Server-Side Apply
 
-创建和更新资源推荐使用 server-side apply，field manager 使用固定名称：
+Managed resources are created and updated with server-side apply using a fixed field manager:
 
 ```text
-namespaceclass-controller
+namespace-class-controller
 ```
 
-好处：
+Benefits:
 
-1. 避免简单 update 覆盖用户不相关字段。
-2. 可以通过 field ownership 发现字段冲突。
-3. 符合 Kubernetes controller 管理声明式资源的常见方式。
+1. It matches Kubernetes declarative controller conventions.
+2. It avoids overwriting unrelated fields managed by others.
+3. It surfaces field ownership conflicts.
+4. It supports drift repair through repeated apply.
 
-### 8.2 已存在资源处理
+The controller does not use force ownership by default.
 
-如果目标资源已经存在：
+### 8.2 Existing Resources
 
-1. 如果带有 controller 的 managed marker，controller 可以 apply 更新。
-2. 如果不带 managed marker，controller 不应接管，应该记录 conflict。
+If a desired resource already exists:
 
-这避免 controller 意外覆盖用户手动创建的资源。
+1. If it has controller ownership markers for the same namespace UID, the controller may update it.
+2. If it does not have matching ownership markers, the controller refuses to manage it and records `Ready=False` / `ApplyConflict`.
 
-### 8.3 删除策略
+This prevents accidental overwrite or adoption of user-created objects.
 
-删除只基于 inventory 中记录的资源，并且删除前再次检查资源是否仍然带有 controller 的 managed marker。
+### 8.3 Partial Apply
 
-如果对象存在但 marker 已被移除，controller 不删除它，并记录 warning。
+Kubernetes does not provide a transaction across multiple resources. The correct behavior is recoverability, not rollback.
 
-当 `NamespaceClass` 被删除时，本设计的默认行为是清理所有仍引用该 class 的 namespace 对应的 managed resources。具体做法是将 desired set 视为空，根据 `NamespaceClassBinding.status.inventory` 删除已管理资源。该行为风险较高，尤其当 class 中包含 cluster-scoped resources 时，管理员误删 class 可能触发大规模删除。保守替代方案是保留资源并把 binding 标记为 `ClassNotFound`，要求管理员显式设置 cleanup policy 后再删除。本设计选择默认删除，但将其列为明确风险项。
+The controller handles partial apply as follows:
 
-该删除路径只适用于 API server 明确返回 `NotFound` 的情况。读取 `NamespaceClass` 时的瞬时 API 错误、权限错误或 cache/discovery 异常不应被解释为 class 不存在；controller 必须直接返回错误并 requeue，不能清理 inventory、删除 binding 或删除 managed resources。
+1. Render, parse, validate, and prepare all desired resources before applying any resource.
+2. Apply resources one by one.
+3. Record every successfully applied resource in `appliedRefs`.
+4. If apply fails midway, do not delete stale resources.
+5. Write `status.inventory = oldInventory + appliedRefs`.
+6. Write `Ready=False` with `ApplyFailed`, `ApplyConflict`, or a more specific reason.
+7. Requeue and let the next reconcile continue from durable state.
+
+Key principle:
+
+- Do not lose inventory for resources that were already created.
+- Do not delete old resources until the new desired set has been fully applied.
+
+### 8.4 Stale Deletion
+
+After all desired resources apply successfully, the controller deletes resources that are in old inventory but not in the new desired set.
+
+Deletion is based on inventory and ownership markers:
+
+1. If the stale object is missing, treat it as already deleted.
+2. If the object exists but no longer has matching ownership markers, do not delete it.
+3. If deletion fails, keep inventory and write `Ready=False` / `DeleteFailed`.
+4. If deletion succeeds, final successful status records only the desired inventory.
 
 ## 9. Switching Classes
 
-namespace class 从 `public-network` 切换到 `internal-network` 时：
+When a namespace switches from class A to class B:
 
-```text
-旧 inventory:
-  NetworkPolicy/allow-public-ingress
+1. Namespace watch enqueues the namespace.
+2. Reconciler reads the new class label.
+3. Binding spec is updated to the new class.
+4. Resources for class B are rendered and applied.
+5. Only after class B applies successfully, stale resources from class A are deleted.
+6. Binding inventory is updated to class B's desired set.
 
-新 desired set:
-  NetworkPolicy/allow-vpn-only
-
-controller:
-  apply NetworkPolicy/allow-vpn-only
-  delete NetworkPolicy/allow-public-ingress
-  update inventory
-```
-
-不需要单独保存旧 class 名。只要 inventory 准确，diff 就足够处理 class 切换。
+No separate "old class name" is required. Accurate inventory is enough to compute stale resources.
 
 ## 10. Updating Classes
 
-`NamespaceClass` 更新时：
+When a `NamespaceClass` changes:
 
-```text
-1. NamespaceClass event handler 收到更新事件
-2. 使用 NamespaceClassBinding.spec.className 索引找到所有引用该 class 的 binding
-3. enqueue 每个 binding.spec.namespaceName 对应的 Namespace
-4. Namespace Reconciler 对每个 namespace 重新计算 desired set
-5. 创建新增资源，更新已有资源，删除被移除资源
-```
+1. The class watch fires.
+2. The controller lists bindings by `spec.className`.
+3. Bound namespaces are enqueued.
+4. Each namespace reconciles against the latest class generation.
+5. New desired resources are created.
+6. Removed desired resources are deleted as stale.
+7. Binding status records `observedClassGeneration`.
 
-例如：
+Class updates never apply resources directly. They only fan out namespace reconcile requests.
 
-```text
-old public-network:
-  NetworkPolicy/allow-public-ingress
+## 11. Status and Observability
 
-new public-network:
-  NetworkPolicy/allow-public-ingress
-  ServiceAccount/public-app
+`NamespaceClassBinding.status` is the primary per-namespace observability surface.
 
-结果:
-  已有 NetworkPolicy 被 apply 更新
-  新 ServiceAccount 被创建
-  inventory 被更新
-```
+It contains:
 
-## 11. 状态与可观测性
+- `observedNamespaceUID`
+- `observedClassGeneration`
+- `inventory`
+- `conditions`
 
-第一版以 `NamespaceClassBinding` 作为主要状态对象，并辅以 Kubernetes Events、controller logs 和 metrics。
+Common condition reasons:
 
-`NamespaceClassBinding.status` 至少包含：
+- `BindingRecorded`
+- `ClassNotFound`
+- `CleanupFailed`
+- `GVKDenied`
+- `ApplyConflict`
+- `ApplyFailed`
+- `DeleteFailed`
+- `DuplicateResource`
+
+Example failure:
 
 ```yaml
 status:
-  observedNamespaceUID: "..."
-  observedClassGeneration: 3
-  inventory:
-    - apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
-      namespace: web-portal
-      name: allow-public-ingress
   conditions:
     - type: Ready
       status: "False"
       reason: ApplyConflict
-      message: "NetworkPolicy/allow-public-ingress has field ownership conflict"
+      message: "resource already exists and is not owned by this NamespaceClass binding"
 ```
 
-binding 解决的是 durable per-namespace status：管理员可以查询某个 namespace 当前绑定哪个 class、同步到哪个 class generation、有哪些 managed resources、最近一次失败原因是什么。
-
-建议记录的事件：
+Suggested Kubernetes Events:
 
 1. `NamespaceClassNotFound`
 2. `ResourceApplyFailed`
@@ -430,402 +470,481 @@ binding 解决的是 durable per-namespace status：管理员可以查询某个 
 5. `InventoryCorrupted`
 6. `ReconcileSucceeded`
 
-metrics 用于表达全局运行状态，例如 queue depth、reconcile latency、apply error count、delete error count、conflict count 和 class fan-out count。
+Suggested metrics:
 
-`NamespaceClass.status` 可以作为后续增强，用于汇总引用该 class 的 namespace 数量、ready 数量和 degraded 数量，但第一版不依赖它完成核心功能。
+1. reconcile latency,
+2. workqueue depth,
+3. apply error count by GVK and reason,
+4. delete error count by GVK and reason,
+5. ownership conflict count,
+6. class fan-out count,
+7. periodic drift repair count.
 
-## 12. 安全与权限
+`NamespaceClass.status` is not required for the first version. A future version
+could summarize the number of referencing namespaces and the number of
+ready/degraded bindings for that class.
 
-由于 `NamespaceClass` 支持任意资源，controller 的 RBAC 权限是重要风险点。
+The first implementation focuses on durable binding status. Events, logs, and
+metrics are useful future additions and should not replace durable conditions.
 
-需要考虑：
+## 12. Security and Permissions
 
-1. controller 需要管理多种 namespaced resources 和 cluster-scoped resources。
-2. controller 可能需要广泛的 cluster-level write 权限。
-3. 管理员可以通过 `NamespaceClass` 间接让 controller 创建高权限资源，例如 `RoleBinding` 或 `ClusterRoleBinding`。
-4. cluster-scoped resources 存在全局命名冲突和大范围误删风险。
+Supporting arbitrary resources is powerful but risky.
 
-推荐策略：
+Main risk:
 
-1. `NamespaceClass` 的写权限只授予集群管理员。
-2. controller 支持可配置的 GVK allowlist/denylist。产品能力支持任意资源，但具体部署可以通过策略限制可执行的 GVK。
-3. 第一版 runtime guard 默认 allow-all，但默认 deny `rbac.authorization.k8s.io/v1/ClusterRoleBinding`，阻止最直接的 controller privilege proxy 提权路径。
-4. denylist 优先于 allowlist；如果 allowlist 非空，则不在 allowlist 内的 GVK 也会被拒绝。
-5. 对高风险资源，例如 `ClusterRoleBinding`，需要显式改变部署策略才可能放行。
-6. 所有 managed resources 必须带 ownership marker 和 namespace UID annotation。
-7. 使用 `make rbac-check` 检查已部署 controller ServiceAccount 的实际 RBAC，必需权限缺失时失败，并把 broad/high-risk 权限作为 warning 暴露出来。
-8. 所有 apply/delete 失败都要记录在 `NamespaceClassBinding.status.conditions` 和 metrics 中。
+If a user can create or update `NamespaceClass`, they may be able to make the controller create high-impact cluster resources. For example, a `ClusterRoleBinding` could grant privileges.
 
-## 13. 极端边界情况
+This is the primary security risk. It exists because the product requirement is
+to support arbitrary resources, including cluster-scoped resources. The
+controller's service account becomes the execution identity for those templates.
+If the controller has broad write permissions, a `NamespaceClass` author can
+proxy those permissions through the controller.
 
-### 13.1 Namespace 数量非常大
+Current controls:
 
-如果集群中有几万甚至更多 namespace，`NamespaceClass` 更新会产生 fan-out：所有引用该 class 的 namespace 都需要重新 reconcile。
+1. `NamespaceClass` write access should be limited to cluster administrators.
+2. Runtime GVK policy supports allowlist and denylist.
+3. Denylist wins over allowlist.
+4. `rbac.authorization.k8s.io/v1/ClusterRoleBinding` is denied by default.
+5. Denied resources write `Ready=False` / `GVKDenied` and are not applied.
+6. The controller refuses to adopt unmanaged existing resources.
+7. Deletes require inventory plus ownership markers.
 
-风险：
+Current risk:
 
-1. 瞬间 enqueue 大量 namespace。
-2. API server 被大量 get/apply/delete 请求打满。
-3. controller 内存占用增加。
-4. reconcile 延迟变高，最终一致时间变长。
+The demo Helm chart grants broad controller permissions so it can support arbitrary resources. Production deployments should narrow RBAC when possible, usually together with a restrictive GVK allowlist.
 
-应对：
+High-impact examples include:
 
-1. 使用 informer cache 和 label index，避免每次 class 更新都全量扫描所有 namespace。
-2. 使用 rate-limited workqueue，限制重试和突发流量。
-3. 设置合理的 `MaxConcurrentReconciles`，例如从 5 到 20 开始，根据集群规模调优。
-4. 对 class 更新触发的 fan-out 分批 enqueue，而不是一次性对 API server 施压。
-5. controller 指标暴露 queue depth、reconcile latency、error count、apply count。
-6. 接受 eventual consistency，不承诺所有 namespace 立即完成同步。
-7. 具体并发、QPS 和同步延迟目标必须根据目标集群规模压测确定；在缺少目标环境数据时，设计只能给出限流和观测原则，不能承诺固定完成时间。
+1. `ClusterRoleBinding` privilege escalation,
+2. cluster-scoped resource naming conflicts across namespaces,
+3. accidental deletion of cluster-scoped resources when class or binding state is wrong,
+4. applying resources blocked by namespace `ResourceQuota` or admission policies,
+5. controller RBAC drift where the configured GVK policy allows a resource but
+   the service account is not authorized to apply or delete it.
 
-### 13.2 单个 NamespaceClass 包含大量资源
+The `make rbac-check` harness target should treat missing required permissions
+as failures and broad/high-risk permissions as warnings. Runtime apply/delete
+authorization failures should be recorded as binding conditions and, in future
+versions, metrics.
 
-如果一个 class 包含几百甚至上千个资源模板：
+Admission webhook enforcement is planned but not installed yet.
 
-风险：
+## 13. Edge Cases
 
-1. 单次 reconcile 时间过长。
-2. `NamespaceClassBinding.status.inventory` 可能接近 Kubernetes object size limit。
-3. apply 中途失败会导致部分资源已更新、部分资源未更新。
+### 13.1 Very Large Namespace Counts
 
-应对：
+If a class is used by thousands or tens of thousands of namespaces, class
+updates can fan out many reconcile requests.
 
-1. 对单个 class 的资源数量设置合理上限。
-2. inventory 只记录资源 identity，不保存完整对象。
-3. reconcile 保持幂等，失败后允许重试继续推进。
-4. 对超大 class 返回 validation error，要求管理员拆分。
+Risks:
 
-### 13.3 Class 更新风暴
+1. API server load from many get/apply/delete calls.
+2. Workqueue backlog.
+3. Large numbers of status updates.
+4. High memory pressure if the controller scans and materializes too much state.
+5. Long convergence time after a class update.
 
-管理员或自动化系统频繁更新 `NamespaceClass` 时，会导致大量 namespace 反复入队。
+Mitigations:
 
-应对：
+1. Fan out by binding index instead of scanning all namespaces.
+2. Keep reconcile idempotent.
+3. Use rate limiting and controller-runtime workqueue behavior.
+4. Keep inventory identity-only.
+5. Configure `MaxConcurrentReconciles` conservatively. A reasonable first
+   production range is 5 to 20, then tune with API server metrics.
+6. Consider batching or throttling fan-out in future versions.
+7. Track queue depth, reconcile latency, fan-out size, and error rates.
 
-1. workqueue 天然按 key 去重，同一个 namespace 不需要重复排队多次。
-2. 使用 generation/observedGeneration，避免处理过期事件。
-3. 对错误重试使用指数退避。
-4. 指标中暴露 class fan-out 次数和队列积压。
+The design intentionally does not promise a fixed convergence SLA before load
+testing, because the actual limit depends on namespace count, resource count per
+class, API server capacity, admission latency, and RBAC/cache behavior.
 
-### 13.4 Namespace 快速切换 Class
+### 13.2 Large NamespaceClass Resource Lists
 
-namespace label 可能从 A 切到 B，又快速切到 C。
+A single class may contain many resources.
 
-应对：
+Risks:
 
-1. reconcile 总是读取当前 namespace 状态，而不是依赖事件中的旧值。
-2. 每次根据当前 label 重新计算 desired set。
-3. 通过 inventory diff 清理不再需要的资源。
-4. 操作必须幂等，重复 apply/delete 不应造成错误状态。
+1. Long reconcile duration.
+2. Partial apply failure.
+3. Large binding inventory approaching Kubernetes object size limits.
 
-### 13.5 Namespace 正在删除
+Mitigations:
 
-如果 namespace 正在删除，namespaced resources 会由 Kubernetes namespace deletion 流程清理。
+1. Prepare all resources before apply.
+2. Preserve partial apply inventory.
+3. Store only resource identity in inventory.
+4. Surface failure status clearly.
+5. Add a configurable maximum resource count per class in a future webhook.
+6. Ask administrators to split very large classes into smaller classes or a
+   separate composition mechanism if they exceed operational limits.
 
-应对：
+### 13.3 Class Update Storms
 
-1. controller 不强行逐个删除 namespaced resources，交给 Kubernetes namespace garbage collection。
-2. 如果 inventory 中包含 cluster-scoped resources，则需要在 namespace 删除前清理它们。
-3. controller 在成功解析到 `NamespaceClass` 且创建 managed resources 前，为 namespace 添加 `namespaceclass.akuity.io/finalizer`。
-4. namespace 删除时，controller 只清理 inventory 中 `namespace` 为空的 cluster-scoped resources，清理成功后删除 `NamespaceClassBinding` 并移除 finalizer。
-5. 如果某个部署通过策略禁用了 cluster-scoped resources，可以避免 namespace finalizer，降低卡死风险。
+Frequent updates to a class can enqueue many reconciles.
 
-### 13.6 NamespaceClass 被删除
+Risks:
 
-如果某个 class 被删除，但仍有 namespace 引用它：
+1. The same namespace can be reconciled repeatedly while the class is changing.
+2. Status updates can amplify API server load.
+3. A broken class can produce a large volume of repeated failures.
 
-默认行为：
+Mitigations:
 
-1. 将引用该 class 的 namespace 的 desired set 视为空。
-2. 根据 `NamespaceClassBinding.status.inventory` 删除此前由该 class 管理的资源。
-3. 删除完成后清理对应 binding，或将 binding 标记为 cleanup completed。
+1. Watch predicates only react to generation changes.
+2. Reconcile always reads current state instead of trusting event payloads.
+3. Workqueue coalescing helps collapse repeated events.
+4. Use exponential backoff on repeated failures.
+5. Track fan-out count and backlog metrics.
 
-风险：
+### 13.4 Fast Class Switching
 
-1. 管理员误删 class 会触发大规模资源删除。
-2. 如果 class 中包含 cluster-scoped resources，影响范围可能超过单个 namespace。
+A namespace may switch classes multiple times quickly.
 
-保守替代方案是保留已有资源，把 binding 标记为 `ClassNotFound`，等待管理员显式设置 cleanup policy 后再删除。本设计选择默认删除，因为它更符合“class 不存在时 desired set 为空”的声明式模型，但该行为必须在文档和运维手册中明确。
+Mitigations:
 
-### 13.7 API Discovery 失败
+1. Reconcile reads the latest namespace label.
+2. Binding spec records the observed class.
+3. Inventory diff is based on current desired set and previous inventory.
+4. Apply-before-delete avoids deleting old resources before new resources are fully created.
+5. Partial apply failure records successfully applied resources in inventory and
+   skips stale deletion until all desired resources have applied.
 
-controller 需要判断资源是 namespaced 还是 cluster-scoped。这个判断依赖 API discovery。
+### 13.5 Namespace Deletion
 
-风险：
+Namespaced resources are normally garbage-collected by namespace deletion. Cluster-scoped resources are not.
 
-1. API server 短暂不可用。
-2. CRD 刚安装，discovery cache 尚未刷新。
-3. 某个 kind 已被删除。
+The controller adds a namespace finalizer once it has resolved a class and is about to create managed resources.
 
-应对：
+During namespace deletion:
 
-1. discovery 失败时不要猜测 scope，直接 requeue。
-2. 对 unknown kind 记录错误。
-3. 定期刷新 RESTMapper/discovery cache。
-4. 如果 CRD 后续恢复，reconcile 应该能自动成功。
+1. Read binding inventory.
+2. Filter to cluster-scoped inventory entries.
+3. Delete those cluster-scoped resources if ownership markers match.
+4. Delete the binding.
+5. Remove the namespace finalizer.
 
-### 13.8 目标资源已存在
+Risk:
 
-如果 class 模板要创建 `ServiceAccount/app`，但 namespace 中已经存在同名 `ServiceAccount/app`，且不是 controller 管理：
+If cluster-scoped cleanup repeatedly fails, the namespace finalizer can keep the
+namespace in `Terminating`. If a deployment policy disables cluster-scoped
+managed resources entirely, the controller can avoid adding the namespace
+finalizer and rely on Kubernetes namespace garbage collection for namespaced
+resources.
 
-风险：
+### 13.6 NamespaceClass Deletion
 
-1. 覆盖用户资源会破坏现有工作负载。
-2. 接管已有资源会造成 ownership 不清晰。
+If a namespace still references a deleted class, the default behavior is to treat the desired set as empty.
 
-应对：
+This deletes previously managed resources from binding inventory and removes the binding after cleanup.
 
-1. 不覆盖。
-2. 记录 conflict event。
-3. 保持该 namespace reconcile 为失败或 degraded。
-4. 管理员需要重命名模板资源，或手动删除/迁移已有资源。
+Risk:
 
-### 13.9 Inventory 丢失或损坏
+An accidental class deletion can trigger large-scale cleanup, especially with cluster-scoped resources.
 
-如果 `NamespaceClassBinding` 被用户删除，或 `status.inventory` 内容损坏：
+Important guard:
 
-风险：
+Only an explicit API `NotFound` is treated as class deletion. Transient read errors, permission errors, cache errors, or discovery problems are returned as errors and do not trigger cleanup.
 
-1. controller 无法知道旧资源有哪些。
-2. class 切换或删除 label 时可能无法清理旧资源。
+### 13.7 API Discovery Failure
 
-应对：
+The controller uses RESTMapper to determine whether each desired resource is namespaced or cluster-scoped.
 
-1. 优先从 labels 反查 managed resources 进行 best-effort rebuild。
-2. 只删除同时满足 managed marker 和 namespace UID annotation 的资源。
-3. 如果无法安全重建，记录 `InventoryCorrupted`，停止危险删除。
-4. 后续成功 apply 后重写 `NamespaceClassBinding.status.inventory`。
+If REST mapping fails:
 
-### 13.10 部分 Apply 成功
+1. The controller does not guess scope.
+2. No resource is applied if prepare fails before apply.
+3. Binding status records `Ready=False` / `ApplyFailed`.
+4. Later reconciles can succeed after the CRD or discovery state is fixed.
 
-一次 reconcile 中可能前几个资源 apply 成功，后一个资源失败。
+### 13.8 Target Resource Already Exists
 
-应对：
+A desired resource may already exist before the controller tries to manage it.
 
-1. 不做事务性回滚，Kubernetes controller 通常依赖幂等重试。
-2. 成功 apply 的资源保留。
-3. 返回错误并 requeue。
-4. 下次 reconcile 继续推进，直到 desired state 达成。
+Policy:
 
-### 13.11 Server-Side Apply 冲突
+1. If it has matching ownership markers for the same namespace binding, reconcile
+   may continue.
+2. If it is unmanaged or owned by another namespace binding, reconcile must fail
+   with `Ready=False` / `ApplyConflict`.
+3. The controller should not auto-adopt unmanaged resources.
 
-如果用户手动修改了 controller 管理字段，server-side apply 可能出现 field conflict。
+This prevents a `NamespaceClass` template from accidentally or intentionally
+overwriting resources that were created by users or other controllers.
 
-应对：
+### 13.9 Inventory Loss or Damage
 
-1. 默认不使用 force apply。
-2. 对每个 desired resource 使用 server-side apply；已经成功 apply 的资源会被记录进临时 inventory。
-3. 将冲突记录到 `NamespaceClassBinding.status.conditions`，reason 使用 `ApplyConflict`。
-4. 对冲突资源不强制覆盖，不把从未成功 apply 的新增冲突资源写入 inventory。
-5. 已经在旧 inventory 中的资源继续保留 inventory 记录，避免后续失去 ownership 线索。
-6. 如果 apply 阶段失败，stale resource 删除会推迟到下一次成功 reconcile；这样避免 class 切换时先删除旧资源、但新 class 资源没有完整创建。
-7. 可以提供可选配置 `forceConflicts: true`，但默认关闭；force 模式应标记为高风险，因为它会覆盖其他 field manager 的字段。
+If binding inventory is deleted or corrupted, cleanup can become unsafe.
 
-### 13.12 RBAC 权限不足
+Current first version:
 
-controller 可能没有权限创建某种资源。
+1. Binding deletion is repaired by requeueing the namespace when the binding watch observes deletion.
+2. Damaged inventory that cannot be parsed causes delete failure status rather than unsafe deletion.
+3. The controller does not delete resources it cannot confidently identify.
 
-应对：
+Future enhancement:
 
-1. apply/delete 返回 forbidden 时记录 event。
-2. 不重试过快，避免无意义打 API server。
-3. 暴露 metrics，方便管理员发现 RBAC 配置缺失。
-4. 文档明确 controller 需要哪些权限，或要求为允许的 GVK 配置对应 RBAC。
+1. Rebuild best-effort inventory by listing resources with matching management
+   labels when the GVK set is known.
+2. Record `Ready=False` / `InventoryCorrupted` if rebuild is incomplete.
+3. Continue to avoid unsafe deletion for resources whose identity or ownership
+   cannot be proven.
 
-### 13.13 ResourceQuota 或 Admission Webhook 拒绝
+### 13.10 Partial Apply Failure
 
-namespace 中的 quota、validating webhook、mutating webhook 可能拒绝资源创建。
+Kubernetes has no transaction across multiple resources. The controller cannot
+guarantee "all resources applied" or "nothing changed".
 
-应对：
+Required behavior:
 
-1. 将错误记录到 event。
-2. reconcile requeue，但使用退避。
-3. 不绕过 admission。
-4. 接受 namespace 处于 degraded 状态，直到管理员修复配置。
+1. Render, parse, validate, and resolve all desired resources before applying any
+   resource.
+2. Record each successfully applied resource in an `appliedRefs` set.
+3. If apply fails midway, write inventory as the union of old inventory and
+   `appliedRefs`.
+4. Do not delete stale resources after a partial apply failure.
+5. Record `Ready=False` / `ApplyFailed` and retry.
+6. Delete stale resources only after all desired resources apply successfully.
 
-### 13.14 Cluster-Scoped Resource 命名冲突
+This keeps partially created resources recoverable and cleanable during retries.
 
-如果多个 namespace 使用同一个 class，而 class 中定义了同名 cluster-scoped resource，会发生冲突。
+### 13.11 Server-Side Apply Field Conflict
 
-应对：
+If another field manager owns a field that the template wants to change,
+server-side apply can return a conflict.
 
-1. 推荐模板支持变量，例如 `{{ .Namespace.Name }}`。
-2. 对 cluster-scoped resources 要求名称全局唯一。
-3. validating admission webhook 应尽可能提前发现同一个 class 内的重复 identity。
+Default policy:
 
-考虑题目要求支持任意资源，本设计保留 cluster-scoped resource 支持，但文档中明确命名责任和风险。
+1. Do not use forced field ownership by default.
+2. Record `Ready=False` / `ApplyFailed` or `ApplyConflict`.
+3. Let the administrator resolve the conflict or change the template.
 
-### 13.15 多副本 Controller 并发
+Alternative:
 
-controller 通常会运行多个副本以保证高可用。
+A future opt-in `forceConflicts: true` policy could force ownership. This is
+high risk because it can overwrite other controllers' field ownership and should
+not be the default.
 
-应对：
+### 13.12 RBAC Insufficient
 
-1. 开启 leader election，确保同一时间只有一个 active reconciler。
-2. 即使没有 leader election，apply/delete 逻辑也应尽量幂等。
-3. inventory 更新需要处理 resourceVersion conflict，失败后重新读取并重试。
+The configured GVK policy may allow a resource while the controller service
+account lacks the actual Kubernetes permission to create, patch, or delete it.
 
-## 14. 设计取舍和考量
+Behavior:
 
-### 14.1 Raw Object API vs 强类型 API
+1. The controller receives a Kubernetes authorization error.
+2. Binding status records `Ready=False` / `ApplyFailed` or `DeleteFailed`.
+3. Reconcile retries with rate limiting.
+4. Metrics should make authorization failures visible.
 
-选择 raw Kubernetes object list：
+The harness should include `make rbac-check` so deployment manifests can be
+checked against the intended controller capabilities.
 
-```yaml
-spec:
-  resources:
-    - apiVersion: ...
-      kind: ...
-      metadata:
-        name: ...
-      spec: ...
-```
+### 13.13 ResourceQuota or Admission Rejection
 
-原因：
+Apply may fail because a namespace quota, policy webhook, or built-in admission
+plugin rejects the object.
 
-1. 题目要求支持任意 Kubernetes 资源。
-2. controller 不需要为每种资源设计专门字段。
-3. 新 CRD 安装后也能被 `NamespaceClass` 使用。
+Behavior:
 
-代价：
+1. The controller records failure status and relies on retry.
+2. It does not bypass Kubernetes admission.
+3. It should avoid stale deletion if desired resource apply has not completed.
 
-1. CRD schema 校验能力弱。
-2. 错误更多在 reconcile 阶段暴露。
-3. 管理员需要理解原生 Kubernetes 对象结构。
+### 13.14 Cluster-Scoped Resource Naming Conflict
 
-这个取舍是合理的，因为题目的核心需求是灵活性，而不是强约束的专用 API。
+Two namespaces can render the same cluster-scoped resource name.
 
-### 14.2 ConfigMap Inventory vs NamespaceClassBinding CRD
+Mitigations:
 
-第一版选择 cluster-scoped `NamespaceClassBinding` 保存 inventory。
+1. Templates should usually include `{{ .Namespace.Name }}` or another stable
+   namespace-derived value in cluster-scoped names.
+2. The controller refuses to manage a cluster-scoped resource with ownership
+   markers that belong to another namespace binding.
+3. GVK policy can deny cluster-scoped resource kinds that are too risky for the
+   deployment.
 
-优点：
+### 13.15 Multi-Replica Controllers
 
-1. inventory 不会因为 namespace 内 ConfigMap 被 namespace deletion 清理而丢失。
-2. 可以可靠记录 cluster-scoped resources，支持 namespace 删除前清理。
-3. 可以表达 per-namespace conditions、observed generation 和错误状态。
-4. 管理员有一个稳定查询入口，知道某个 namespace 的 class 同步状态。
+Production controllers may run multiple replicas.
 
-缺点：
+Leader election should be enabled for active/passive operation. Apply and delete
+operations should still remain idempotent, because retries and repeated events
+are normal.
 
-1. 增加一个额外 CRD 和 controller 维护逻辑。
-2. binding 生命周期需要和 namespace、class 删除语义配合。
-3. inventory 损坏时仍然需要 best-effort rebuild。
-4. namespace finalizer 会把 cleanup 失败转化为 namespace 删除阻塞，需要清晰的状态、日志和运维排障手段。
+If active/active behavior is introduced later, binding status updates must handle
+resourceVersion conflicts by refetching and retrying instead of overwriting
+another reconciler's status.
 
-ConfigMap inventory 实现更简单，但不适合本设计对任意资源和 cluster-scoped resources 的支持目标。
+## 14. Design Tradeoffs
+
+### 14.1 Raw Object API vs Typed API
+
+The design uses raw Kubernetes objects in `spec.resources`.
+
+Benefits:
+
+1. Supports arbitrary resources as required.
+2. Does not require bespoke API fields per resource type.
+3. Can support newly installed CRDs.
+
+Costs:
+
+1. Weak CRD schema validation.
+2. More errors appear during reconciliation.
+3. Users must understand Kubernetes object schemas.
+
+### 14.2 NamespaceClassBinding vs Namespace-Scoped ConfigMap Inventory
+
+The design stores inventory in a cluster-scoped `NamespaceClassBinding`.
+
+Benefits:
+
+1. Inventory survives namespace deletion long enough to clean cluster-scoped resources.
+2. Per-namespace status is queryable from one stable object.
+3. Observed generation and inventory are kept together.
+
+Costs:
+
+1. Adds another CRD.
+2. Requires binding lifecycle management.
+3. Inventory damage still needs careful handling.
+4. Namespace finalizers can make failed cluster-scoped cleanup block namespace
+   deletion until the failure is resolved.
 
 ### 14.3 Server-Side Apply vs Create/Update
 
-选择 server-side apply。
+Server-side apply is preferred because it is closer to declarative controller behavior and surfaces field conflicts.
 
-优点：
+Cost:
 
-1. 更符合声明式 controller 模型。
-2. 可以保留其他 field manager 管理的字段。
-3. 更容易处理 drift。
+The controller must handle field ownership conflicts and avoid force ownership by default.
 
-代价：
+### 14.4 Conservative Ownership vs Auto-Adoption
 
-1. 需要处理 field conflict。
-2. 实现比简单 create/update 稍复杂。
-3. 管理员需要理解哪些字段由 controller 管理。
+The controller does not adopt existing resources that lack matching ownership markers.
 
-### 14.4 保守 Ownership vs 自动接管
+Benefits:
 
-选择保守策略：不接管已有但未标记为 managed 的资源。
+1. Avoids overwriting user-managed resources.
+2. Keeps ownership boundaries explainable.
+3. Makes conflict recovery clear.
 
-原因：
+Cost:
 
-1. 避免破坏用户手动创建的对象。
-2. ownership 边界清晰。
-3. 出错时更容易解释和恢复。
+Administrators may need to rename templates or manually migrate existing resources.
 
-代价：
+### 14.5 Supporting Arbitrary Resources vs Security Risk
 
-1. 管理员可能需要手动处理同名资源冲突。
-2. 初次迁移已有资源时不够自动化。
+The problem requires arbitrary resources, including cluster-scoped resources.
 
-这个取舍偏安全，适合作为 controller 的默认行为。
+This increases security risk. The design accepts the product requirement but makes the risk explicit and mitigates it through:
 
-### 14.5 支持任意资源 vs 安全风险
+1. admin-only `NamespaceClass` writes,
+2. runtime GVK policy,
+3. default `ClusterRoleBinding` deny,
+4. ownership markers,
+5. inventory-based deletion,
+6. future admission webhook validation.
 
-题目要求支持任意资源，因此设计上支持 namespaced resources 和 cluster-scoped resources。
+The safest production posture is to combine all three controls:
 
-但这带来额外风险：
+1. narrow who can write `NamespaceClass`,
+2. configure a deployment-specific GVK allowlist,
+3. grant the controller only the RBAC verbs required by that allowlist.
 
-1. 命名是全局的，容易冲突。
-2. 删除需要更谨慎，不能依赖 namespace deletion；必须依赖 binding inventory 和 namespace finalizer 清理 cluster-scoped resources。
-3. RBAC 风险更高。
-4. 高权限资源可能被 `NamespaceClass` 间接创建。
+### 14.6 Dynamic Informers vs Primary Object Events
 
-控制方式：
+Dynamic informers could repair managed-resource drift faster, but they significantly increase complexity for arbitrary GVKs.
 
-1. `NamespaceClass` 写权限只授予集群管理员。
-2. controller 支持 GVK allowlist/denylist；产品能力支持任意资源，但部署策略可以限制实际允许的 GVK。
-3. runtime guard 默认 deny `ClusterRoleBinding`，并在 `NamespaceClassBinding.status.conditions` 中记录 `Ready=False` / `GVKDenied`。
-4. cluster-scoped resources 推荐使用模板变量生成唯一名称。
-5. 删除行为必须基于 binding inventory 和 ownership marker。
+The first version chooses:
 
-### 14.6 Watch Managed Resources vs 只靠主资源事件
+1. `Namespace` watch,
+2. `NamespaceClass` fan-out,
+3. `NamespaceClassBinding` watch,
+4. periodic requeue.
 
-只监听 `Namespace`、`NamespaceClass` 和 `NamespaceClassBinding` 可以满足核心需求，但无法及时发现用户删除或修改了已管理资源。
+Dynamic managed-resource watches remain a future enhancement.
 
-推荐监听 managed resources：
+## 15. Test Plan
 
-1. 如果已管理资源被删除，controller 可以重新创建。
-2. 如果已管理资源发生 drift，controller 可以重新 apply。
+Core tests:
 
-controller-runtime 对编译期已知类型支持很好，例如在代码中直接 watch `Namespace`、`Deployment` 或 `NetworkPolicy`。但 `NamespaceClass.spec.resources` 允许管理员在运行时引用任意 GVK，controller 编译时不知道这些类型。如果要实时 watch 它们，需要使用 dynamic informer 针对 `unstructured.Unstructured` 动态创建 informer，并处理 discovery、RESTMapper 缓存刷新、informer 生命周期、RBAC 失败和内存占用。
+1. A labeled namespace creates a binding and desired resources.
+2. Managed resources are recorded in binding inventory.
+3. Class updates fan out to existing namespaces.
+4. Class switching creates new resources and deletes stale resources.
+5. Label removal cleans old resources and deletes the binding.
+6. Class deletion cleans old resources only when the class read returns `NotFound`.
+7. Non-`NotFound` class read errors do not clean resources.
+8. Cluster-scoped resources are recorded and cleaned during namespace deletion.
+9. GVK policy denies high-risk resources.
+10. Existing unmanaged resources produce `ApplyConflict`.
+11. Server-side apply field conflicts are not force-owned.
+12. Partial apply records successful inventory and skips stale deletion.
+13. Unknown GVK and RESTMapper failures produce stable status.
+14. Template variables render correctly and unknown variables fail before apply.
+15. Binding deletion is repaired by requeueing the namespace.
+16. Periodic requeue repairs deleted managed resources.
+17. Reserved controller labels and annotations cannot be abused to bypass
+    ownership checks.
+18. Namespaced templates with an explicit foreign namespace are normalized by
+    the current runtime path and should be rejected once the webhook is enabled.
+19. Inventory damage produces failure status rather than unsafe deletion.
+20. Delete failures preserve stale inventory and report `DeleteFailed`.
 
-第一版不做 dynamic informer，只 watch `Namespace`、`NamespaceClass` 和 `NamespaceClassBinding`，并通过周期性 resync 修复 drift。这牺牲了 drift 修复速度，但明显降低实现复杂度。dynamic informer 作为后续增强。
+Admission webhook tests to add when the webhook is implemented:
 
-## 15. 测试计划
+1. Reject missing `apiVersion`, `kind`, or `metadata.name`.
+2. Reject duplicate desired resource identity.
+3. Reject controller-reserved labels and annotations.
+4. Reject unsupported template variables.
+5. Reject denied GVKs.
+6. Reject namespaced resources that explicitly target another namespace.
 
-核心测试：
+Scale tests to consider:
 
-1. 创建带 class label 的 namespace 后，class 中的资源被创建。
-2. namespace 从 class A 切到 class B 后，A 独有资源被删除，B 资源被创建。
-3. `NamespaceClass` 增加资源后，已有 namespace 自动获得新资源。
-4. `NamespaceClass` 删除资源后，已有 namespace 中对应 managed resource 被删除。
-5. 移除 namespace 的 class label 后，已管理资源被清理。
-6. 目标资源已存在但不是 controller 管理时，controller 不覆盖并记录 conflict。
-7. `NamespaceClassBinding.status.inventory` 损坏时，controller 不执行危险删除。
-8. unknown GVK 或 discovery 失败时，controller 记录错误并 requeue。
-9. server-side apply conflict 时，controller 不强制覆盖。
-10. namespace 删除时，cluster-scoped resources 能被清理。
-11. validating admission webhook 拒绝缺少 `apiVersion`、`kind`、`metadata.name` 或使用保留 label 的 class。
-12. 模板变量渲染失败时，controller 不部分执行 class。
+1. A class referenced by many namespaces, for example 10,000 namespaces in a
+   non-local performance environment.
+2. A class with many resource templates, including enough entries to approach
+   inventory object-size concerns.
+3. Rapid class updates.
+4. High-frequency class switching.
+5. Workqueue de-duplication and backlog behavior under repeated class updates.
+6. Reconcile throughput with different `MaxConcurrentReconciles` values.
 
-规模测试：
+## 16. Success Criteria
 
-1. 1 万个 namespace 同时引用同一个 class，更新 class 后 controller 不应压垮 API server。
-2. 单个 class 包含大量资源时，controller 能稳定重试并暴露错误。
-3. 高频 class 更新时，workqueue 能去重并保持 eventual consistency。
+The design is successful when:
 
-## 16. 成功标准
+1. Namespace creation with a class label creates the desired resources.
+2. Namespace class switching is eventually consistent and safe.
+3. NamespaceClass updates reconcile all bound namespaces.
+4. The controller does not overwrite resources it does not own.
+5. Partial failure remains recoverable and cleanable.
+6. Administrators can explain why each managed resource exists, which class created it, and which namespace it belongs to.
+7. High-risk arbitrary-resource behavior is bounded by RBAC, GVK policy, ownership markers, and explicit status.
+8. Large-scale and error-path behavior is idempotent, retryable, and observable.
 
-该设计成功的标准：
+## 17. Summary
 
-1. Namespace 创建后，controller 能根据 class 创建 desired resources。
-2. Namespace 切换 class 后，旧资源被清理，新资源被创建。
-3. NamespaceClass 更新后，所有引用它的 namespace 最终同步到新 desired state。
-4. controller 不覆盖不属于自己的资源。
-5. controller 在错误和大规模场景下保持幂等、可重试、可观测。
-6. 管理员可以解释每个资源为什么存在、由哪个 class 创建、属于哪个 namespace。
+This design treats `NamespaceClass` as a namespace-level resource template set and relies on controller reconciliation, durable inventory, server-side apply, and ownership boundaries for correctness.
 
-## 17. 总结
-
-这个方案把 `NamespaceClass` 设计成“namespace 级资源模板集合”，把实际正确性交给 controller 的 reconciliation、inventory diff、server-side apply 和 ownership 边界。
-
-第一版保持 API 简洁：
+The first version keeps the API small:
 
 ```text
-NamespaceClass.spec.resources = raw Kubernetes objects
-Namespace label = class binding
-Inventory = cluster-scoped NamespaceClassBinding.status.inventory
-Apply = server-side apply
-Delete = inventory diff
+Namespace label -> NamespaceClass -> raw resource templates
+Inventory -> cluster-scoped NamespaceClassBinding.status.inventory
+Apply -> server-side apply
+Delete -> inventory diff plus ownership checks
 ```
 
-这套设计能覆盖题目要求，同时保留清晰的演进路径：如果需要更严格安全控制，可以强化 GVK allowlist/denylist 和 admission webhook；如果需要更快 drift 修复，可以加入 dynamic informer watch managed resources。
+It satisfies the core problem requirements while leaving clear future paths:
+
+- admission webhook validation for stronger safety,
+- dynamic informer watches for faster drift repair,
+- narrower production RBAC with deployment-specific GVK allowlists,
+- metrics and events for operational visibility,
+- inventory rebuild for damaged binding state.

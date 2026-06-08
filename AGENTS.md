@@ -1,34 +1,35 @@
-# 项目须知
+# Project Notes
 
-## 文档索引
+## Document Index
 
-- 项目目标与快速入口：`README.md`
-- 稳定领域语言与边界：`CONTEXT.md`
-- 当前设计方案：`docs/design/namespaceclass-design.md`
-- 实施计划目录：`docs/plans/`
-- ADR 目录：`docs/adr/`
-- 进度、TODO、完成记录和经验：`docs/progress/progress.md`、`docs/progress/todos.md`、`docs/progress/done.md`、`docs/progress/learnings.md`
+- Project goals and quick entry point: `README.md`
+- Stable domain language and boundaries: `CONTEXT.md`
+- Current design: `docs/design/namespaceclass-design.md`
+- Chinese design reference: `docs/design/namespaceclass-design-zh.md`
+- Implementation plans: `docs/plans/`
+- ADRs: `docs/adr/`
+- Progress, TODOs, completion log, and learnings: `docs/progress/progress.md`, `docs/progress/todos.md`, `docs/progress/done.md`, `docs/progress/learnings.md`
 
-## 工作流程
+## Workflow
 
-- 新增功能前，先判断是否影响 `docs/design/namespaceclass-design.md` 中的 API、controller reconciliation、inventory、RBAC 或测试 harness；影响这些边界时先更新设计或写 ADR。
-- 较大改动进入实现前，先在 `docs/plans/{日期}-{主题}.md` 写实施计划，明确验收命令。
-- 代码改动默认遵循 TDD：先写能失败的测试或集群 smoke，再实现最小代码让它通过，最后重构并运行最小充分 `make` 目标。
-- 纯文档、注释或机械格式改动不需要强行补测试；涉及 controller 行为、CRD/schema、status、inventory、RBAC、模板渲染或 Helm manifest 时，必须先有对应单元测试、envtest 或 smoke 验证。
-- 不要绕过 Makefile 约定写临时验证脚本；确实需要新增脚本时放入 `scripts/` 并接入 Makefile。
-- 不要把本地 minikube 状态、kubeconfig、下载的工具、构建产物或日志提交进仓库。
+- Before adding a feature, check whether it affects API shape, controller reconciliation, inventory, RBAC, templates, Helm manifests, or the verification harness described in `docs/design/namespaceclass-design.md`. If it does, update the design or write an ADR first.
+- Before substantial implementation work, write an implementation plan in `docs/plans/{date}-{topic}.md` with explicit acceptance commands.
+- Code changes follow TDD by default: write a failing unit test, envtest, or cluster smoke check first; implement the smallest code that passes; then refactor and run the smallest sufficient `make` target.
+- Pure documentation, comments, or mechanical formatting changes do not require tests. Changes that affect controller behavior, CRD/schema, status, inventory, RBAC, template rendering, or Helm manifests must have matching unit, envtest, or smoke coverage first.
+- Do not bypass Makefile conventions with temporary verification scripts. If a new script is truly needed, put it under `scripts/` and wire it into the Makefile.
+- Do not commit local minikube state, kubeconfig, downloaded tools, build artifacts, or logs.
 
-## 验证规则
+## Verification Rules
 
-- 纯文档改动：运行 `make docs-check`。
-- Go 代码改动：至少运行 `make test` 和 `make vet`；涉及 Kubernetes API、CRD、status 或 reconciler 行为时补充 `make envtest`。
-- manifest、CRD、Helm chart 改动：运行 `make manifests-check` 和 `make helm-template`。
-- controller 行为或集群交互改动：在本地 minikube 上运行 `make cluster-check`、`make deploy-crds` 和 `make smoke`。
-- 收尾优先运行 `make check`；它包含普通 Go 单测、envtest 集成测试、vet、manifest check 和 Helm render。如果因为本机缺少 Go、kubectl、helm、envtest assets 或 minikube 无法运行，在最终说明里写清楚缺失项和已完成的替代验证。
+- Documentation-only changes: run `make docs-check`.
+- Go code changes: run at least `make test` and `make vet`. If the change touches Kubernetes API behavior, CRDs, status, or reconciler behavior, also run `make envtest`.
+- Manifest, CRD, or Helm chart changes: run `make manifests-check` and `make helm-template`.
+- Controller behavior or live-cluster interaction changes: run `make cluster-check`, `make deploy-local`, and `make smoke` against local minikube.
+- Prefer `make check` before finishing. It includes formatting checks, module drift checks, lint, unit tests, envtest, vet, script checks, manifest lint, and Helm rendering. If local Go, kubectl, helm, envtest assets, or minikube are unavailable, state the missing prerequisite and the substitute verification that was completed.
 
-## 状态同步
+## Status Sync
 
-- 新增待办写入 `docs/progress/todos.md`。
-- 完成待办后移动到 `docs/progress/done.md`，保留日期和简短说明。
-- 重要设计取舍写入 `docs/adr/`。
-- 可复用的调试经验写入 `docs/progress/learnings.md`。
+- Add new TODOs to `docs/progress/todos.md`.
+- Move completed TODOs to `docs/progress/done.md` with the date and a short note.
+- Record important design tradeoffs in `docs/adr/`.
+- Record reusable debugging lessons in `docs/progress/learnings.md`.

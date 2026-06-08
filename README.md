@@ -144,6 +144,7 @@ flowchart TD
 ## Project Notes
 
 - Design lives in `docs/design/namespaceclass-design.md`.
+- Chinese design reference lives in `docs/design/namespaceclass-design-zh.md`.
 - Implementation plans live in `docs/plans/`.
 - Progress tracking lives in `docs/progress/`.
 - Tools installed by `make tools` are local to `.tools/bin` and are ignored by git.
